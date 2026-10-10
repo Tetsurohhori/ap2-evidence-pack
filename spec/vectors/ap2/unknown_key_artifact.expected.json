@@ -1,0 +1,18 @@
+{
+ "description": "The valid pack SEALED with a key nobody defined inside an artifact entry — a claim a relying party could read as evidence. SPEC §9.1: the entry is closed, so it is that artifact's error and the pack is not valid.",
+ "normative": {
+  "bindings_ok": false,
+  "digest_ok": true,
+  "policy_ok": true,
+  "pq_protected": false,
+  "producer_ok": null,
+  "producer_present": false,
+  "producer_trusted": null,
+  "rfc3161_claimed": false,
+  "rfc3161_verified": null,
+  "self_asserted_only": true,
+  "valid": false
+ },
+ "policy": {},
+ "vector": "unknown_key_artifact"
+}

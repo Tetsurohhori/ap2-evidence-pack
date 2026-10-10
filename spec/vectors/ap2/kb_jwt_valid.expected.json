@@ -1,0 +1,23 @@
+{
+ "description": "A holder-bound mandate: the issuer payload carries cnf.jwk and the KB-JWT (typ kb+jwt; iat, aud, nonce, sd_hash present — RFC 9901 §4.3) verifies under it. The positive control of the KB-JWT path: a verifier that rejects every KB-JWT fails here.",
+ "normative": {
+  "bindings_ok": true,
+  "digest_ok": true,
+  "policy_ok": true,
+  "pq_protected": false,
+  "producer_ok": null,
+  "producer_present": false,
+  "producer_trusted": null,
+  "rfc3161_claimed": false,
+  "rfc3161_verified": null,
+  "self_asserted_only": true,
+  "valid": true
+ },
+ "policy": {},
+ "report": {
+  "ignored": [
+   {}
+  ]
+ },
+ "vector": "kb_jwt_valid"
+}

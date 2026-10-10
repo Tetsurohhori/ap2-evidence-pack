@@ -102,22 +102,73 @@ function es256Verify(signingInput, signature, jwk) {
 function verifyKbJwt(parsed, resolved) {
   const kb = parsed.kbJwt; if (!kb) return { present: false };
   const seg = kb.split("."); if (seg.length !== 3) throw new Refused("kb-jwt must have 3 dot-separated segments");
-  let header, payload; try { header = jsonOf(b64uDecode(seg[0])); payload = jsonOf(b64uDecode(seg[1])); } catch (e) { throw new Refused("kb-jwt header/payload invalid"); }
+  let header, payload; try { header = jsonOf(b64uDecode(seg[0])); payload = jsonOf(b64uDecode(seg[1])); } catch (e) { throw new Refused("kb-jwt header/payload invalid: " + e.message); }   // 1.4.0: the inner reason, as the reference
   if (header.alg !== "ES256") throw new Refused("kb-jwt alg unsupported");
   if (typeof header !== "object" || header === null || Array.isArray(header) || typeof payload !== "object" || payload === null || Array.isArray(payload)) throw new Refused("kb-jwt header and payload must be objects");
+  // 1.4.0 (SPEC §9.2): RFC 9901 §4.3 — typ REQUIRED, MUST be kb+jwt (§7.3 step 5.d); iat/aud/nonce/sd_hash REQUIRED with their types.
+  // Presence and type, never the values (sealed scope: recorded, not validated). Checked whether or not the holder key is known.
+  if (header.typ !== "kb+jwt") throw new Refused('kb-jwt typ must be "kb+jwt" (RFC 9901 §4.3)');
+  const ignored = { kb_jwt_header: joseHeaderIgnored(header, "kb-jwt header") };
+  for (const [claim, pred, desc] of [["iat", (v) => Number.isInteger(v), "an integer"], ["aud", isStr, "a string"], ["nonce", isStr, "a string"], ["sd_hash", isStr, "a string"]]) {
+    if (!(claim in payload)) throw new Refused("kb-jwt payload: missing " + claim + " (RFC 9901 §4.3)");
+    if (!pred(payload[claim])) throw new Refused("kb-jwt payload: " + claim + " must be " + desc + " (RFC 9901 §4.3)"); }
+  ignored.kb_jwt_claims = unknownMembers(payload, KB_CLAIMS_REGISTERED);
   const cnf = resolved !== null && typeof resolved === "object" && "cnf" in resolved ? resolved.cnf : undefined;   // r2: cnf absent or object; cnf.jwk absent or object
   if (cnf !== undefined && (cnf === null || typeof cnf !== "object" || Array.isArray(cnf))) throw new Refused("cnf must be an object");
+  ignored.cnf = unknownMembers(cnf, CNF_REGISTERED);   // RFC 7800 §3.1: not understood -> ignored, here reported
   b64uDecode(seg[2]);   // §3.1 applies to all three segments even when the holder key is unknown (see the reference)
   const recorded = {}; for (const k of ["aud", "nonce", "iat"]) if (k in payload) recorded[k] = payload[k];   // the sealed scope says these are RECORDED whenever a KB-JWT is present
   const jwk = cnf !== undefined && "jwk" in cnf ? cnf.jwk : undefined;
-  if (jwk === undefined) return { present: true, verified: null, claims_recorded_not_validated: recorded, note: "no cnf.jwk in issuer payload — holder key unknown (declared)" };
+  if (jwk === undefined) return { present: true, verified: null, claims_recorded_not_validated: recorded, note: "no cnf.jwk in issuer payload — holder key unknown (declared)", _ignored: ignored };
   if (jwk === null || typeof jwk !== "object" || Array.isArray(jwk)) throw new Refused("cnf.jwk must be an object");
+  ignored.cnf_jwk = unknownMembers(jwk, JWK_REGISTERED);   // RFC 7517 §4
   const sigOk = es256Verify(Buffer.from(seg[0] + "." + seg[1], "ascii"), b64uDecode(seg[2]), jwk);
   const presentation = parsed.compact.slice(0, parsed.compact.lastIndexOf("~")) + "~";
   const sdHashOk = payload.sd_hash === b64u(sha256(Buffer.from(presentation, "ascii")));
-  return { present: true, verified: Boolean(sigOk && sdHashOk), signature_ok: sigOk, sd_hash_ok: sdHashOk, note: null, claims_recorded_not_validated: recorded };   // final check: the sealed scope says these are RECORDED — the reference did it, this verifier did not
+  return { present: true, verified: Boolean(sigOk && sdHashOk), signature_ok: sigOk, sd_hash_ok: sdHashOk, note: null, claims_recorded_not_validated: recorded, _ignored: ignored };   // final check: the sealed scope says these are RECORDED — the reference did it, this verifier did not
 }
 const PROVENANCE_CLASSES = new Set(["supplied", "x5c_header", "jwk_header", "jwks_fetched"]);
+// ---- closed schema (SPEC §9, 1.4.0): every object this format defines is an exhaustive key list (unknown = refusal / artifact
+// error / FAIL entry, the key named); every object a standard defines follows that standard's rule for the unknown (ignored AND
+// reported). Measured 2026-10-10 on 1.3.0: a key nobody defined inside rfc3161_timestamp, the producer block or a signature entry
+// was accepted with valid: true and no trace in the receipt. Same lists, same three messages as the reference.
+const JOSE_HEADER_REGISTERED = new Set(["alg", "jku", "jwk", "kid", "x5u", "x5c", "x5t", "x5t#S256", "typ", "cty", "crit"]);   // RFC 7515 §4.1, RFC 7519 §5
+const JWK_REGISTERED = new Set(["kty", "use", "key_ops", "alg", "kid", "x5u", "x5c", "x5t", "x5t#S256", "crv", "x", "y", "d"]);   // RFC 7517 §4, RFC 7518 §6.2
+const CNF_REGISTERED = new Set(["jwk", "jwe", "jku", "kid"]);                                                                     // RFC 7800 §3.1
+const KB_CLAIMS_REGISTERED = new Set(["iss", "sub", "aud", "exp", "nbf", "iat", "jti", "nonce", "sd_hash"]);                      // RFC 7519 §4.1, RFC 9901 §4.3
+const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const isStr = (v) => typeof v === "string", isBool = (v) => typeof v === "boolean", isList = Array.isArray;
+const T = {
+  str: [isStr, "a string"], bool: [isBool, "a boolean"], obj: [isObj, "an object"], list: [isList, "a list"], any: [() => true, ""],
+  strOrNull: [(v) => v === null || isStr(v), "a string or null"], boolOrNull: [(v) => v === null || isBool(v), "a boolean or null"],
+  isTrue: [(v) => v === true, "true"], listOfStr: [(v) => isList(v) && v.every(isStr), "a list of strings"],
+  scheme: [(v) => v === "hybrid" || v === "classical-only", '"hybrid" or "classical-only"'], over: [(v) => v === "evidence_digest_sha256", '"evidence_digest_sha256"'],
+  enc: [(v) => v === "hex" || v === "b64url", '"hex" or "b64url"'] };
+// [type, required]
+const TOP_KEYS = { evidence_format: [T.str, 1], subject: [T.str, 1], created_utc: [T.str, 1], artifacts: [T.list, 1], bindings: [T.list, 0], honest_scope: [T.str, 1],
+                   evidence_digest_sha256: [T.str, 1], rfc3161_timestamp: [T.obj, 0], producer_signatures: [T.obj, 0] };
+const RFC3161_KEYS = { anchored: [T.bool, 1], tsr_b64: [T.str, 0], tsa_url: [T.str, 0], tsa: [T.str, 0], note: [T.str, 0] };   // tsr_b64 ABSENT under anchored: §6.4, rfc3161_verified false
+const PRODUCER_KEYS = { scheme: [T.scheme, 1], over: [T.over, 1], signatures: [T.list, 1] };
+const BINDING_KEYS = { in: [T.str, 1], claim: [T.str, 1], commits_to: [T.str, 1], encoding: [T.enc, 1] };
+const ARTIFACT_KEYS = { name: [T.str, 1], sd_jwt_compact: [T.str, 1], header: [T.obj, 1], key: [T.obj, 1], resolved_claims: [T.any, 1], kb_jwt: [T.obj, 1], verified_at_build: [T.obj, 1] };
+const KEY_KEYS = { jwk: [T.obj, 1], provenance_class: [T.str, 1], note: [T.str, 0], x5c_chain_sha256: [T.listOfStr, 0], jwks_url: [T.str, 0], jwks_sha256: [T.str, 0], fetched_utc: [T.str, 0] };
+const KB_COPY_KEYS = { present: [T.bool, 1], verified: [T.boolOrNull, 0], signature_ok: [T.bool, 0], sd_hash_ok: [T.bool, 0], note: [T.strOrNull, 0], claims_recorded_not_validated: [T.obj, 0] };
+const VAB_KEYS = { signature_ok: [T.isTrue, 1], disclosures_ok: [T.isTrue, 1] };
+const ENTRY_KEYS = new Set(["sig_alg", "public_key_b64", "signature_b64", "post_quantum"]);
+function checkClosed(obj, what, allowed) {   // SPEC §9.1 — the same three messages as the reference's _check_closed
+  if (!isObj(obj)) throw new Refused(what + " must be an object (SPEC §9.1)");
+  for (const k of Object.keys(obj)) if (!Object.hasOwn(allowed, k)) throw new Refused(what + ": unknown key " + JSON.stringify(k) + " (SPEC §9.1)");
+  for (const [k, [[pred, desc], required]] of Object.entries(allowed)) {
+    if (k in obj) { if (!pred(obj[k])) throw new Refused(what + ": " + k + " must be " + desc + " (SPEC §9.1)"); }
+    else if (required) throw new Refused(what + ": missing " + k + " (SPEC §9.1)"); }
+}
+function joseHeaderIgnored(header, what) {   // RFC 7515 §4 (ignore when not understood) and §4.1.11 (crit: an extension not understood = the JWS is invalid)
+  if ("crit" in header) { const c = header.crit;
+    if (!isList(c) || !c.length || c.some((x) => !isStr(x)) || new Set(c).size !== c.length || c.some((x) => JOSE_HEADER_REGISTERED.has(x) || !(x in header))) throw new Refused(what + ": malformed crit (RFC 7515 §4.1.11)");
+    throw new Refused(what + ": crit names extension(s) this verifier does not understand (RFC 7515 §4.1.11: the JWS is invalid)"); }
+  return Object.keys(header).filter((k) => !JOSE_HEADER_REGISTERED.has(k)).sort(cmp);
+}
+const unknownMembers = (obj, registered) => isObj(obj) ? Object.keys(obj).filter((k) => !registered.has(k)).sort(cmp) : [];
 function checkProvenance(pc, parsed, key) {   // returns: is this key SELF-ASSERTED as far as an offline verifier can tell? (r7, fail-closed)
   // r5: `jwk_header`/`x5c_header` are RECONCILED with the header the verifier just parsed (relabelling jwk_header as
   // x5c_header used to flip self_asserted_only to false with no x5c anywhere); `supplied`/`jwks_fetched` are capture-time
@@ -190,14 +241,20 @@ function verifyProducerBlock(block, message, trusted) {
   for (const s of Array.isArray(block?.signatures) ? block.signatures : []) {
     const alg = s?.sig_alg, pub = s?.public_key_b64 ?? "";
     if (typeof alg !== "string") { nFail++; results.push({ sig_alg: null, status: "FAIL", post_quantum: false, key_trusted: null }); allPinned = false; continue; }   // r2: "constructor"/"__proto__" as sig_alg crashed the pin lookup on a prototype-bearing table
-    const v = verifyProducer(alg, pub, s?.signature_b64 ?? "", message);
+    // 1.4.0 — SPEC §9.1: the entry is a CLOSED object (exactly four keys, these types, post_quantum iff ml-dsa-65): otherwise a FAIL entry, never a pass
+    const keys = Object.keys(s); if (!isObj(s) || keys.length !== 4 || keys.some((k) => !ENTRY_KEYS.has(k)) || !isStr(s.public_key_b64) || !isStr(s.signature_b64) || !isBool(s.post_quantum) || s.post_quantum !== (alg === "ml-dsa-65")) {
+      nFail++; results.push({ sig_alg: alg, status: "FAIL", post_quantum: alg === "ml-dsa-65", key_trusted: null, note: "entry is not the closed shape of SPEC §9.1" }); allPinned = false; continue; }
+    const v = verifyProducer(alg, pub, s.signature_b64, message);
     const status = v === true ? "PASS" : v === null ? "SKIP" : "FAIL"; if (v === true) nPass++; else if (v === false) nFail++; else nSkip++;
     let keyTrusted = null; if (trusted !== null) { const allowed = Object.hasOwn(trusted, alg) ? trusted[alg] : []; keyTrusted = allowed.includes(pub); if (!keyTrusted) allPinned = false; }
     if (v === true && alg === "ml-dsa-65" && (trusted === null || keyTrusted)) pq = true;
     results.push({ sig_alg: alg, status, post_quantum: alg === "ml-dsa-65", key_trusted: keyTrusted });
   }
-  const ok = nPass >= 1 && nFail === 0 && nSkip === 0; const trustedOk = trusted === null ? null : (results.length > 0 && allPinned && nSkip === 0);
-  return { ok, incomplete: nSkip > 0 && nFail === 0, pq_protected: pq, trusted: trustedOk, results };
+  // 1.4.0 — SPEC §5/§9.1: `scheme` reconciled with the entries ("hybrid" = a classical AND an ml-dsa-65 entry; "classical-only" = no ml-dsa-65)
+  const algs = results.map((r) => r.sig_alg); const hasPq = algs.includes("ml-dsa-65"), hasClassical = algs.some((a) => a === "ed25519" || a === "ecdsa-p256");
+  const schemeOk = (block?.scheme === "hybrid" && hasPq && hasClassical) || (block?.scheme === "classical-only" && !hasPq);
+  const ok = nPass >= 1 && nFail === 0 && nSkip === 0 && schemeOk; const trustedOk = trusted === null ? null : (results.length > 0 && allPinned && nSkip === 0);
+  return { ok, incomplete: nSkip > 0 && nFail === 0, pq_protected: pq, trusted: trustedOk, results, scheme_ok: schemeOk };
 }
 // ---- RFC 3161 token: minimal DER walk — TimeStampResp{ status PKIStatusInfo{ INTEGER }, timeStampToken ContentInfo{ OID, [0] SignedData{ ..., encapContentInfo{ OID id-ct-TSTInfo, [0] OCTET STRING TSTInfo } } } }
 // TSTInfo{ version, policy OID, messageImprint{ AlgorithmIdentifier, OCTET STRING hash } ... }. Same two facts the reference checks
@@ -257,11 +314,18 @@ export function verifyEvidence(path, opts = {}) {
   if ("rfc3161_timestamp" in ev && (ev.rfc3161_timestamp === null || typeof ev.rfc3161_timestamp !== "object" || Array.isArray(ev.rfc3161_timestamp))) return refuse("rfc3161_timestamp must be an object");
   if ("rfc3161_timestamp" in ev && typeof ev.rfc3161_timestamp.anchored !== "boolean") return refuse("rfc3161_timestamp.anchored must be a boolean");   // r2: [] / {} were "anchored, unverified" here and "not anchored" in the reference
   if ("producer_signatures" in ev && (ev.producer_signatures === null || typeof ev.producer_signatures !== "object" || Array.isArray(ev.producer_signatures))) return refuse("producer_signatures must be an object");
+  try {   // 1.4.0 — SPEC §9.1: the top-level object, the anchor block, the producer block and every binding entry are CLOSED
+    checkClosed(ev, "top level", TOP_KEYS);
+    if ("rfc3161_timestamp" in ev) checkClosed(ev.rfc3161_timestamp, "rfc3161_timestamp", RFC3161_KEYS);
+    if ("producer_signatures" in ev) checkClosed(ev.producer_signatures, "producer_signatures", PRODUCER_KEYS);
+    (ev.bindings ?? []).forEach((b, i) => checkClosed(b, "bindings[" + i + "]", BINDING_KEYS));
+  } catch (e) { return refuse(String(e.message ?? e)); }
   const e2 = Object.create(null); for (const k of Object.keys(ev)) if (!["evidence_digest_sha256", "rfc3161_timestamp", "producer_signatures"].includes(k)) e2[k] = ev[k];
   const recomputed = sha256(Buffer.from(canon(e2), "utf-8")).toString("hex"); const digestOk = recomputed === ev.evidence_digest_sha256;
   const artResults = []; let allOk = true; const forBindings = [];
   for (const a of ev.artifacts) {
-    try { const compact = a.sd_jwt_compact; if (typeof compact !== "string" || compact !== compact.trim() || !/^[\x00-\x7f]*$/.test(compact)) throw new Refused("sd_jwt_compact must be the exact ASCII compact serialization");
+    try { checkClosed(a, "artifact", ARTIFACT_KEYS); checkClosed(a.key, "artifact key", KEY_KEYS); checkClosed(a.kb_jwt, "artifact kb_jwt", KB_COPY_KEYS); checkClosed(a.verified_at_build, "artifact verified_at_build", VAB_KEYS);   // 1.4.0 — SPEC §9.1
+      const compact = a.sd_jwt_compact; if (typeof compact !== "string" || compact !== compact.trim() || !/^[\x00-\x7f]*$/.test(compact)) throw new Refused("sd_jwt_compact must be the exact ASCII compact serialization");
       if (!a.key || typeof a.key !== "object" || Array.isArray(a.key)) throw new Refused("artifact key.jwk must be an object");
       const pc = a.key.provenance_class;   // r2: a list was sorted here; r5: out-of-enum passed as a strong class; r7: absent/null used to CLEAR self_asserted_only
       if (typeof pc !== "string" || !PROVENANCE_CLASSES.has(pc)) throw new Refused("artifact key.provenance_class must be one of " + [...PROVENANCE_CLASSES].sort().join(", "));
@@ -269,10 +333,15 @@ export function verifyEvidence(path, opts = {}) {
       // r6: this shape check spent round 5 INSIDE an unterminated line comment — a signed payload that is a JSON array
       // verified in this verifier and failed in the reference. It runs before checkProvenance, which reads the header.
       if (parsed.payload === null || typeof parsed.payload !== "object" || Array.isArray(parsed.payload) || parsed.header === null || typeof parsed.header !== "object" || Array.isArray(parsed.header)) throw new Refused("JWT header and payload must be objects");
+      if (canon(a.header) !== canon(parsed.header)) throw new Refused("artifact header copy differs from the decoded protected header (SPEC §2)");   // 1.4.0: the informative copy must say what the signed header says
+      if (Boolean(parsed.kbJwt) !== a.kb_jwt.present) throw new Refused("artifact kb_jwt.present contradicts the compact serialization (SPEC §9.1)");
+      // SPEC §9.2 — the standards' rule for the unknown: ignored, and REPORTED (crit: RFC 7515 §4.1.11, a rejection)
+      const ignored = { header: joseHeaderIgnored(parsed.header, "JWT header"), header_jwk: unknownMembers(parsed.header.jwk, JWK_REGISTERED), key_jwk: unknownMembers(a.key.jwk, JWK_REGISTERED) };
       const prov = checkProvenance(pc, parsed, a.key); const selfAsserted = prov.selfAsserted;   // r5: reconciled with the signed header; r7: decides self_asserted_only
       const sigOk = es256Verify(parsed.signingInput, parsed.signature, a.key.jwk); const resolved = resolveDisclosures(parsed.payload, parsed.disclosures);
       const claimsOk = canon(resolved) === canon(a.resolved_claims ?? null); const kb = verifyKbJwt(parsed, resolved);
-      artResults.push({ name: a.name, signature_ok: sigOk, claims_match: claimsOk, kb_jwt: kb, provenance_class: a.key?.provenance_class, self_asserted: selfAsserted, ...(prov.ident ? { x5c_leaf: prov.ident } : {}) });
+      Object.assign(ignored, kb._ignored ?? {}); delete kb._ignored; const ign = {}; for (const k of Object.keys(ignored).sort(cmp)) if (ignored[k].length) ign[k] = ignored[k];   // SPEC §9.2: only the non-empty slots
+      artResults.push({ name: a.name, signature_ok: sigOk, claims_match: claimsOk, kb_jwt: kb, provenance_class: a.key?.provenance_class, self_asserted: selfAsserted, ignored: ign, ...(prov.ident ? { x5c_leaf: prov.ident } : {}) });
       allOk = allOk && sigOk && claimsOk && kb.verified !== false; forBindings.push({ name: a.name, compact: parsed.compact, resolved });
     } catch (e) { artResults.push({ name: a?.name, error: String(e.message ?? e) }); allOk = false; }
   }
@@ -280,10 +349,10 @@ export function verifyEvidence(path, opts = {}) {
   const bindingsOk = allOk ? asSet(findBindings(forBindings)) === asSet(ev.bindings ?? []) : false;   // `bindings` absent = [] in both; null is refused above
   const ts = ev.rfc3161_timestamp ?? {}; let rfc = { claimed: Boolean(ts.anchored), verified: null };   // `anchored` is a boolean by the shape check above
   if (ts.anchored && typeof ts.tsr_b64 === "string") rfc = { claimed: true, ...verifyRfc3161(ts.tsr_b64, recomputed), tsa_verified: null };   // BINDING only (status granted + messageImprint == digest, SPEC §3.2); TSA signature/chain: this verifier cannot (no openssl) -> tsa_verified null = incomplete under --tsa-cert
-  else if (ts.anchored) rfc = { claimed: true, verified: false, note: "anchored claimed but tsr_b64 absent or not a string" };
+  else if (ts.anchored) rfc = { claimed: true, verified: false, note: "anchored claimed but tsr_b64 absent" };
   const classes = [...new Set(artResults.map((r) => r.provenance_class).filter(Boolean))].sort(cmp);   // r5: by code point, as the reference (default sort is by UTF-16 code unit)
   let producer; const prod = ev.producer_signatures;
-  if (prod) { const pv = verifyProducerBlock(prod, Buffer.from(recomputed, "ascii"), opts.trusted ?? null); producer = { present: true, scheme: prod.scheme, ok: pv.ok, incomplete: pv.incomplete, pq_protected: pv.pq_protected, trusted: pv.trusted, signatures: pv.results };
+  if (prod) { const pv = verifyProducerBlock(prod, Buffer.from(recomputed, "ascii"), opts.trusted ?? null); producer = { present: true, scheme: prod.scheme, scheme_ok: pv.scheme_ok, ok: pv.ok, incomplete: pv.incomplete, pq_protected: pv.pq_protected, trusted: pv.trusted, signatures: pv.results };
     if (!pv.ok) allOk = false; if ((opts.trusted ?? null) !== null && pv.trusted !== true) allOk = false; }
   else producer = { present: false, pq_protected: false, trusted: null };
   let policyOk = true; if (opts.requireProducer && !(producer.present && producer.ok)) policyOk = false;

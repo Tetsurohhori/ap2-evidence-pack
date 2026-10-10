@@ -1,0 +1,27 @@
+{
+ "description": "A signed header carrying a parameter JOSE does not register (ap2_ext). RFC 7515 §4: not understood, not in crit -> MUST be ignored. The pack is valid and the name is REPORTED in artifacts[0].ignored.header (SPEC §9.2).",
+ "normative": {
+  "bindings_ok": true,
+  "digest_ok": true,
+  "policy_ok": true,
+  "pq_protected": false,
+  "producer_ok": null,
+  "producer_present": false,
+  "producer_trusted": null,
+  "rfc3161_claimed": false,
+  "rfc3161_verified": null,
+  "self_asserted_only": true,
+  "valid": true
+ },
+ "policy": {},
+ "report": {
+  "ignored": [
+   {
+    "header": [
+     "ap2_ext"
+    ]
+   }
+  ]
+ },
+ "vector": "header_param_ignored"
+}

@@ -86,11 +86,14 @@ against public test data, not a NIST validation.
 ## Conformance (normative)
 
 The format is defined by `SPEC_AP2_EVIDENCE.md` plus the test vectors in
-`spec/vectors/ap2/` — two ACCEPTs (`valid_signed`, the positive control, and `anchor_valid`,
-a real RFC 3161 token from a probe TSA whose certificate ships beside it) and six REJECTs
+`spec/vectors/ap2/` — five ACCEPTs (`valid_signed`, the positive control; `anchor_valid`,
+a real RFC 3161 token from a probe TSA whose certificate ships beside it; and, since 1.4.0,
+`header_param_ignored`, `kb_jwt_valid`, `key_jwk_member_ignored`) and twelve REJECTs
 (stripped-signature downgrade, valid-but-unpinned producer key, digest mismatch, time
 anchor required-but-missing, time anchor claimed-but-invalid, a real token issued for
-another digest). An independent verifier
+another digest; since 1.4.0 an unknown key at the top level / inside the anchor block / inside
+an artifact entry / inside a producer-signature entry, a `crit` nobody understands, and a
+KB-JWT without `typ: kb+jwt`). An independent verifier
 claims conformance by reproducing each vector's `normative` block under its declared
 policy, from the spec text alone:
 
@@ -100,16 +103,28 @@ python3 spec/vectors/ap2/run_ap2_conformance.py   # exit 0 = conformant
 
 | Implementation | Runtime / deps | Status |
 |---|---|---|
-| `ap2_evidence.py` | Python 3 + `cryptography` | reference — conformant 8/8; ACVP ML-DSA-65 sigVer 9/9 |
-| `verifiers/js/ap2-verify.mjs` | Node with OpenSSL ≥ 3.5 for ML-DSA-65 (measured: Node 22.23.2 / OpenSSL 3.5.7 locally, Node 24 in CI), `node:crypto` only; on an older build ML-DSA-65 is SKIP = incomplete, never a pass, and the ML-DSA vectors are not measured (the JS conformance test skips, it does not pass); no TSA signature check — `tsa_verified` null | independent — conformant 8/8 on every normative field through `run_ap2_conformance.run(verify_fn=…)` (`test_ap2_conformance.py`) |
+| `ap2_evidence.py` | Python 3 + `cryptography` | reference — conformant 17/17; ACVP ML-DSA-65 sigVer 9/9 |
+| `verifiers/js/ap2-verify.mjs` | Node with OpenSSL ≥ 3.5 for ML-DSA-65 (measured: Node 22.23.2 / OpenSSL 3.5.7 locally, Node 24 in CI), `node:crypto` only; on an older build ML-DSA-65 is SKIP = incomplete, never a pass, and the ML-DSA vectors are not measured (the JS conformance test skips, it does not pass); no TSA signature check — `tsa_verified` null | independent — conformant 17/17 on every normative field (and the `report` block) through `run_ap2_conformance.run(verify_fn=…)` (`test_ap2_conformance.py`) |
+
+**Closed schema (1.4.0, SPEC §9).** Measured on 1.3.0 on 2026-10-10: a key nobody had defined, written inside
+`rfc3161_timestamp`, `producer_signatures` or a `signatures[i]` entry, was `valid: true` in both verifiers with nothing in
+the receipt. Every object this format defines is now an exhaustive key list — unknown key, wrong type or missing MUST is a
+refusal / artifact error / FAIL entry that names the key — and every object a standard defines (JOSE header, JWK, `cnf`,
+KB-JWT) follows that standard's rule for the unknown (ignored) and REPORTS the ignored names in `artifacts[i].ignored`;
+`crit` makes the JWS invalid (RFC 7515 §4.1.11). The proof is generative: `verifiers/schema_mutants.py` derives from every
+vector and from freshly signed packs 12 818 mutations at every level of every object (unknown keys in eight spellings and
+every value type, every known key of every hostile type and deleted, duplicate keys, key order, escaped spellings, `crit`,
+KB-JWT claims, out-of-grammar files), computes each one's expected class from the SPEC tables and holds both verifiers to
+it and to each other: 12 818/12 818, 0 disagreements on 1.4.0; on the 1.3.0 verifiers the same corpus passed SILENTLY
+8 186 times in both, with the two agreeing on every one (CHANGELOG 1.4.0). The quick subset (3 085) runs in CI.
 
 **Differential oracle** (`verifiers/differential_oracle.py`, 22/09/2026): the two verifiers must
 give the same `(valid, digest_ok, bindings_ok, producer_ok, pq_protected, rfc3161_verified,
 policy_ok, producer_present, producer_trusted, rfc3161_claimed/granted/imprint_ok/gen_time, chain_verified,
 self_asserted_only, provenance_classes, and the `x5c_leaf` identity of every artifact)`
 — the eleven normative fields of SPEC §6 plus `rfc3161.granted`, `rfc3161.imprint_ok`, `rfc3161.gen_time`,
-`chain_verified`, `provenance_classes` and the `x5c_leaf` identity — on the 8 vectors under their declared policy (plus `anchor_valid` under
-`--require-anchor --tsa-cert`, and the CA-issued `x5c` leaf under `--trust-anchor`), 113 hostile files that carry the digest a lenient verifier would
+`chain_verified`, `provenance_classes` and the `x5c_leaf` identity — on the 17 vectors under their declared policy (plus `anchor_valid` under
+`--require-anchor --tsa-cert`, and the CA-issued `x5c` leaf under `--trust-anchor`), 117 hostile files that carry the digest a lenient verifier would
 recompute or a wrong JSON shape (`__proto__` key with the digest recomputed over it, non-UTF-8, float `1.0`, 2^53+1, 100000-deep,
 `NaN`, lone surrogate, duplicate key, BOM, non-object, `artifacts`/`key`/`jwk`/`rfc3161_timestamp`/
 `producer_signatures` of the wrong type, an empty producer block, base64url with a space /
@@ -148,8 +163,8 @@ REJECT to everything is caught; through 1.2.0 this sentence said more than the o
 controls, and two verifiers refusing one alike were an agreement — measured by ablation on 25/09/2026, see CHANGELOG). The CA-issued `x5c` leaf under `--trust-anchor`, the only case
 where `self_asserted_only` is false, is one of the hostile files, not one of those three — this sentence said
 otherwise through 1.1.2:
-**149 cases, 0 disagreements, of which 4 are declared divergences** (measured 25/09/2026; the run prints its own
-decomposition — `9 vector runs + 117 hostile files + 4 positive controls + 19 CLI cases = 149` — so these numbers are
+**158 cases, 0 disagreements, of which 4 are declared divergences** (measured 2026-10-10 on 1.4.0; the run prints its own
+decomposition — `18 vector runs + 117 hostile files + 4 positive controls + 19 CLI cases = 158` — so these numbers are
 copied from that line rather than counted by hand, which is how several of them went stale during the
 review rounds; this very sentence had gone stale once more, and was caught by the final check) — the real token under `--tsa-cert`, where the
 reference proves the TSA with openssl and the JS verifier reports `tsa_verified: null` and does
@@ -296,6 +311,8 @@ Independent implementations (any language): open a PR to be listed here.
 ```bash
 python3 test_ap2_evidence.py      # negative controls first — the bench can fail
 python3 test_ap2_conformance.py   # conformance vectors + ACVP ML-DSA-65 + signature suite + acceptance profile + CLI grammar + JS agreement
+python3 test_ap2_schema_mutants.py     # closed schema (SPEC §9) under generative mutation, both verifiers, quick subset
+python3 verifiers/schema_mutants.py --full   # the release measurement (12 818 mutations); --py-root/--js point it at an older checkout = positive control
 python3 verifiers/differential_oracle.py   # Python vs Node on every vector, hostile file and CLI case (needs node)
 verifiers/lax_python_ablation.sh           # the strict layers removed from a copy of the reference -> the suite must be red
 AP2_SDK_PATH=... python3 verifiers/sdk_crosscheck.py --hostile   # a third stack, written by other people, on the same tokens

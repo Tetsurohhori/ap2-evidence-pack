@@ -1,0 +1,6 @@
+# gitleaks fingerprints (path-based, `gitleaks dir`). The two KB-JWT conformance vectors of 1.4.0 carry a complete
+# JWT (`eyJ….eyJ….sig`) in sd_jwt_compact: an ES256 signature over public claims under a holder key generated for the
+# vector and discarded. The token IS the test object; it holds no secret. Every other vector carries the same kind of
+# token without triggering the rule (the `~` after the issuer signature breaks the match).
+spec/vectors/ap2/kb_jwt_valid.json:jwt:43
+spec/vectors/ap2/kb_jwt_typ_missing.json:jwt:43

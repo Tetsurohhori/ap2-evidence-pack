@@ -1,5 +1,74 @@
 # Changelog
 
+## 1.4.0 — 2026-10-10 — closed schema: a key the verifier does not understand is never silent
+
+**The finding (2026-10-10, measured on 1.3.0 = `6b2c7cf`).** Following an outside reader's remark on the anchor block
+(AP2 discussion #338), the two verifiers were given `valid_signed.json` with one key nobody had defined,
+`additional_anchors`, written inside `rfc3161_timestamp`: both answered `valid: true` with nothing in the receipt. The
+same silence held for a key inside `producer_signatures`, inside every `signatures[i]` entry, and — once sealed into the
+digest — at the top level and inside an artifact entry; a KB-JWT without `typ: kb+jwt` and a signed header with a `crit`
+naming an extension nobody understands were `valid: true` too (the six 1.4.0 REJECT vectors below, each `valid: true`
+on 1.3.0, re-measured on the release commit). Every fuzzer of this repository varied the TYPES of known fields; none
+ever added a key. Nothing in the specification said what to do with the unknown, so both implementations did the same
+thing: nothing — and the differential oracle, which compares them with each other, had no way to see it.
+
+**The rule, written first (SPEC §9).** Every object this format defines is a CLOSED schema — an exhaustive key list with
+types — and a key outside it is a refusal, an artifact error or a FAIL entry that names the key (§9.1). Every object a
+standard defines follows that standard's rule for the unknown and REPORTS what it ignored (§9.2): JOSE header parameters
+(RFC 7515 §4, ignored; `crit`, RFC 7515 §4.1.11, the JWS is invalid — this format understands no extension), JWK members
+(RFC 7517 §4), `cnf` members (RFC 7800 §3.1), KB-JWT claims (RFC 7519 §4; `typ: kb+jwt` and `iat`/`aud`/`nonce`/`sd_hash`
+REQUIRED, RFC 9901 §4.3). The report is `artifacts[i].ignored`, one sorted list per slot, present only when non-empty.
+The `evidence_format` string, the digest and the sealed scope are unchanged: 1.4.0 narrows what is accepted; every 1.0–1.3
+conformance vector still verifies with the same normative block.
+
+**What changed in both verifiers, identically** (`ap2_evidence.py`, `pqcrypto/sigsuite.py`, `verifiers/js/ap2-verify.mjs`):
+- closed objects with the same three messages (`<object>: unknown key "x" (SPEC §9.1)`, `… must be <type> (SPEC §9.1)`,
+  `…: missing <key> (SPEC §9.1)`): top level, `rfc3161_timestamp`, `producer_signatures`, `bindings[i]` (refusals);
+  artifact entry, `key`, `kb_jwt`, `verified_at_build` (artifact error); `signatures[i]` (FAIL entry);
+- the artifact's `header` copy must canonically equal the decoded protected header; `kb_jwt.present` must agree with the
+  compact serialization; `verified_at_build` is exactly `{signature_ok: true, disclosures_ok: true}`;
+- producer entries: `post_quantum` must be `true` iff `sig_alg` is `ml-dsa-65`; `scheme` is reconciled with the entries
+  (`hybrid` = a classical AND an `ml-dsa-65` entry, `classical-only` = no `ml-dsa-65`) — measured on 1.3.0: `scheme:
+  "hybrid"` over a lone Ed25519 signature was `producer_ok: true`; the receipt gains `producer_signatures.scheme_ok`;
+- `crit` handling and the ignored-name report for the issuer header, its `jwk`, the snapshotted `key.jwk`, `cnf`,
+  `cnf.jwk`, the KB-JWT header and payload; KB-JWT `typ` and the four REQUIRED claims checked (presence and type — the
+  values stay recorded, not validated, as the sealed scope says);
+- `build` refuses a header whose `crit` it does not understand (at the source, like a bad signature) and writes the
+  anchor block's TSA as `tsa_url` (the vectors' spelling; `tsa` stays accepted as the 1.0–1.3 spelling, §9.1).
+Behaviour that moves for packs already in the field: an anchor block, producer block or binding entry with a key outside
+§9.1 is now refused; an empty producer block `{}` or one without `scheme`/`over`/`signatures` is a refusal (1.1.0 r1 made
+it "present, not ok"); a KB-JWT without `typ`/`iat`/`aud`/`nonce`/`sd_hash` makes its artifact fail (the three KB-JWT test
+fixtures of this repository lacked `iat` and were completed).
+
+**Conformance vectors 8 → 17** (`spec/vectors/ap2/`, generator `make_vectors_closed_schema.py`; the five derived from
+`valid_signed` regenerate byte for byte, the four signed with fresh keys are frozen). ACCEPT: `header_param_ignored`,
+`kb_jwt_valid` (the first KB-JWT vector of the set), `key_jwk_member_ignored` — each with a `report` block the runner
+now compares. REJECT: `unknown_key_top_level`, `unknown_key_anchor_block` (the measured mutation), `unknown_key_producer_entry`,
+`unknown_key_artifact`, `header_crit_unknown`, `kb_jwt_typ_missing`. Positive control on the 1.3.0 reference: exactly
+those six are `valid: true` there; the eleven others give the same `valid` on both versions. Both verifiers: 17/17.
+
+**Generative proof (`verifiers/schema_mutants.py`, CI: `test_ap2_schema_mutants.py`).** From every vector and from
+freshly signed packs, every object of §9.1 and §9.2 is mutated at every level — unknown keys in eight spellings (ASCII,
+non-ASCII, `__proto__`, `constructor`, empty, a control character, a case variant of a known key, a dotted name) with
+values of every JSON type, every known key replaced by each hostile type and deleted, duplicate keys (textual), reversed
+key order, `\u`-escaped key spellings, `crit` in eight shapes, KB-JWT `typ`/required claims, duplicate keys inside the
+signed segments, eighteen out-of-grammar files — and each mutation's EXPECTED class is computed from the SPEC tables, never
+from a verifier. Measured 2026-10-10: full corpus 12 818 mutations from 28 sources (quick subset in CI: 3 085) — on 1.4.0
+every mutation got its class in both verifiers, 0 differential disagreements on 12 846 files; on the 1.3.0 verifiers, same
+corpus, 9 825 (Python) / 9 827 (JS) mutations did NOT get their class and **8 186 passed silently in both** (`valid`
+unchanged, nothing in the receipt), with 0 disagreements between the two — they agreed on every silent acceptance. The CI
+test also keeps a built-in control: a copy of the reference with the top-level closure removed turns the bench red.
+Positive control of the bench kept apart by design: one process loads one reference (`--py-root`/`--js`).
+
+**Tests on the release commit** (Python 3.11.2, Node 22.23.2 / OpenSSL 3.5.7): `test_ap2_evidence.py` 30, `test_ap2_conformance.py`
+27, `test_ap2_schema_mutants.py` 2 (new), `test_packaging.py` 6, `test_stamp_tsa_locale.py` 2, `pqcrypto/test_pqsig.py` 13
+(one extended: scheme reconciliation and the closed entry), `pqcrypto/test_acvp_mldsa65.py` 1 — all OK; differential
+oracle, ablation and type-fuzz figures in the README. The new tests remove their own temporary directories.
+
+**Not changed, declared.** The issuer JWT payload is not "closed": every claim is the pack's content and is recorded in
+`resolved_claims` in full (RFC 7519 §4). The §9.2 report never changes `valid`. `sig_alg` values outside the three
+algorithms stay a SKIP (verification gap), as before.
+
 ## 1.3.0 — 2026-10-05 — the wheel no longer shares a directory with PyPI's pqcrypto; cryptography >= 48
 
 - **The wheel installs the signature suite as `ap2_pqcrypto/`, not `pqcrypto/`.** PyPI's `pqcrypto` (1.0.0, a PQClean

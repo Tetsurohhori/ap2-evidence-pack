@@ -1,0 +1,50 @@
+{
+ "artifacts": [
+  {
+   "header": {
+    "alg": "ES256",
+    "ap2_ext": "x",
+    "crit": [
+     "ap2_ext"
+    ],
+    "jwk": {
+     "crv": "P-256",
+     "kty": "EC",
+     "x": "VKmuNyzLWiTsWn4KmwZen50gJKT8HKQFVwLHBwl3UZI",
+     "y": "RSMoI20WtvLbM2SATKbSHPGV2t2CdiIp25iOaxo00DA"
+    },
+    "typ": "ap2-mandate+sd-jwt"
+   },
+   "kb_jwt": {
+    "present": false
+   },
+   "key": {
+    "jwk": {
+     "crv": "P-256",
+     "kty": "EC",
+     "x": "VKmuNyzLWiTsWn4KmwZen50gJKT8HKQFVwLHBwl3UZI",
+     "y": "RSMoI20WtvLbM2SATKbSHPGV2t2CdiIp25iOaxo00DA"
+    },
+    "note": "key embedded in the protected header (self-asserted)",
+    "provenance_class": "jwk_header"
+   },
+   "name": "intent",
+   "resolved_claims": {
+    "iss": "user-wallet",
+    "mandate_type": "intent",
+    "max_amount": "150.00 EUR"
+   },
+   "sd_jwt_compact": "eyJhbGciOiJFUzI1NiIsInR5cCI6ImFwMi1tYW5kYXRlK3NkLWp3dCIsImp3ayI6eyJrdHkiOiJFQyIsImNydiI6IlAtMjU2IiwieCI6IlZLbXVOeXpMV2lUc1duNEttd1plbjUwZ0pLVDhIS1FGVndMSEJ3bDNVWkkiLCJ5IjoiUlNNb0kyMFd0dkxiTTJTQVRLYlNIUEdWMnQyQ2RpSXAyNWlPYXhvMDBEQSJ9LCJhcDJfZXh0IjoieCIsImNyaXQiOlsiYXAyX2V4dCJdfQ.eyJpc3MiOiJ1c2VyLXdhbGxldCIsIm1hbmRhdGVfdHlwZSI6ImludGVudCIsIm1heF9hbW91bnQiOiIxNTAuMDAgRVVSIn0.3UyezqOVooJN950_SBwdRicAbZ94_3F0VgAmqIq3KE4wztHJArc_cxa0sjMDsL_bvJ_LnJ8EwR2x4M_aMhdhvA~",
+   "verified_at_build": {
+    "disclosures_ok": true,
+    "signature_ok": true
+   }
+  }
+ ],
+ "bindings": [],
+ "created_utc": "2026-10-10T00:00:00Z",
+ "evidence_digest_sha256": "afd8b2eb0aba9919f2c7d32eb5faab7f6fbee8dd1a2958631a24407a73834932",
+ "evidence_format": "ap2-evidence-pack/1.0",
+ "honest_scope": "Proves: these exact SD-JWT artifacts, with the snapshotted key material (see each key's provenance_class), verified at build time; the RFC 3161 token (if present) binds this digest to a TimeStampResp, and attests the TSA's clock only once the relying party has verified the TSA's signature (--tsa-cert): a self-issued token satisfies the binding alone. Does NOT prove the issuer authorised the key beyond what the provenance class states, does NOT confer eIDAS qualified-archive legal presumption, and does NOT by itself validate x5c chains to a trust anchor — that is an act of the relying party at verification time, with `--trust-anchor`, reported in `chain_verified` and in each artifact's `x5c_leaf` (SPEC §6.7): the x5c bytes are sealed inside the signed header, the validation RESULT never is — and never proves the truth of the recorded transaction itself. When a producer signature is present, it protects the SEALED CONTENT (the file minus the digest, the anchor block and the signatures themselves - so a removed or downgraded time anchor is caught only under a require-anchor policy), and authenticity ONLY for a relying party that has PINNED the producer public key out of band (an embedded key alone proves consistency, not authenticity), across the retention window (hybrid: a classical signature + FIPS-204 ML-DSA-65, surviving the quantum transition per NIST IR 8547); it does NOT retro-protect the underlying ES256 mandate signature - for the existed-before-a-quantum-adversary claim you still need a trusted time anchor (RFC 3161 / RFC 4998 renewal). 'valid' means each artifact verifies and the SEALED CONTENT is intact — NOT that the file as a whole is unaltered (the anchor block lies outside the digest), NOT that the mandates form a bound chain (read `bindings`) nor that self-asserted keys prove issuer identity (read `provenance_classes`/`self_asserted_only`). KB-JWT holder binding is verified when the issuer payload carries cnf.jwk; without cnf.jwk it is recorded as present-but-unverifiable, never painted green. KB-JWT aud/nonce/iat are RECORDED for the auditor, not validated — their expected values are transaction context this tool cannot know offline.",
+ "subject": "ap2 conformance vector (closed schema)"
+}

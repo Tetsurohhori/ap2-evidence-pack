@@ -1,11 +1,16 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- Copyright 2026 Roberto Locatelli -->
 
-# ap2-evidence-pack — normative format v1.0 (2026-09-05)
+# ap2-evidence-pack — normative format v1.0 (2026-09-05), specification revision 1.4.0 (2026-10-10)
 
 Status: **proposed format** (no standards body; normative for this repository), defined by the conformance vectors in
 `spec/vectors/ap2/` (each `<name>.json` pack + `<name>.expected.json`
-policy/verdict). An independent verifier claims conformance by reproducing every
+policy/verdict). Revision 1.4.0 adds §9, the CLOSED SCHEMA: every object this format defines
+has an exhaustive key list, and a key outside it is a refusal with a reason — never silently
+accepted; objects defined by a standard (JOSE header, JWT claims, JWK, `cnf`) follow that
+standard's rule for the unknown (ignore) and the ignored names are REPORTED in the receipt.
+The `evidence_format` string is unchanged: 1.4.0 narrows what is accepted, it does not change
+the sealed content or the digest of a conformant pack (every 1.0–1.3 vector still verifies). An independent verifier claims conformance by reproducing every
 vector's `normative` block from this text alone — see §7. Reference
 implementation: `ap2_evidence.py` (informative, not normative).
 
@@ -20,7 +25,7 @@ transaction.
 ## 1. Container
 
 One UTF-8 JSON object. A strict parser MUST reject duplicate object keys
-(top-level or nested). Top-level fields:
+(top-level or nested). Top-level fields (the list is EXHAUSTIVE — §9: any other top-level key is a refusal):
 
 | Field | Req | Meaning |
 |---|---|---|
@@ -46,8 +51,8 @@ and it described the producer signature and `valid` as covering "the file", when
 SEALED CONTENT — §3 excludes the digest, the anchor block and the signatures, so a removed time
 anchor is caught only under `require_anchor`.
 | `evidence_digest_sha256` | MUST | hex SHA-256 over the canonical content (§3) |
-| `rfc3161_timestamp` | MUST at build (a verifier treats an absent block as `anchored: false`) | `{"anchored": false, ...}` or `{"anchored": true, "tsr_b64": <b64 DER TimeStampResp>, ...}` |
-| `producer_signatures` | MAY | hybrid producer-signature block (§5) |
+| `rfc3161_timestamp` | MUST at build (a verifier treats an absent block as `anchored: false`) | `{"anchored": false, "note"?: string}` or `{"anchored": true, "tsr_b64": <b64 DER TimeStampResp>, "tsa_url"?: string, "note"?: string}` — closed (§9.1); `tsa` is accepted as the 1.0–1.3 spelling of `tsa_url` |
+| `producer_signatures` | MAY | hybrid producer-signature block (§5), closed (§9.1) |
 
 ## 2. Artifact entry
 
@@ -55,11 +60,13 @@ anchor is caught only under `require_anchor`.
 |---|---|
 | `name` | non-empty string, unique within the pack (a non-string, empty or duplicate name is a refusal at verify; duplicate names MUST reject at build) |
 | `sd_jwt_compact` | the EXACT compact serialization `issuer-JWT~disclosure*~[kb-jwt]` |
-| `header` | the decoded protected header (informative copy) |
+| `header` | the decoded protected header: an informative copy that MUST be canonically equal (§3) to the header the verifier decodes from `sd_jwt_compact` — a copy that says something else is that artifact's error (1.4.0) |
 | `key` | `{"jwk": <P-256 JWK>, "provenance_class": <class>, ...}` — the snapshotted verification key |
 | `resolved_claims` | payload with every `_sd` digest resolved to its disclosed claim |
-| `kb_jwt` | KB-JWT verification record (§6, `kb_verified`) |
-| `verified_at_build` | build-time attestation (informative) |
+| `kb_jwt` | KB-JWT verification record (§6, `kb_verified`): closed object (§9.1) whose `present` MUST equal whether `sd_jwt_compact` carries a KB-JWT |
+| `verified_at_build` | build-time attestation: exactly `{"signature_ok": true, "disclosures_ok": true}` (§9.1 — a pack never carries a red light dressed as evidence) |
+
+An artifact entry is a closed object (§9.1): a key outside this table is that artifact's error.
 
 `provenance_class` is one of `x5c_header`, `jwk_header`, `supplied`, `jwks_fetched`
 — the format records how the key was captured instead of pretending all captures
@@ -183,7 +190,17 @@ elara-mesh runs — one oracle, both stacks.)
 Verification is fail-closed: any present-but-invalid signature makes the block
 (and the pack) invalid; an unknown `sig_alg` or a missing PQ backend is a
 verification GAP (skip), and a block with any gap or zero passing signatures is
-never `ok`. **Pinning:** an embedded key proves internal consistency, never
+never `ok`. 1.4.0 (§9.1): the block is a closed object — exactly `scheme` (one of the two
+values above), `over` (exactly `"evidence_digest_sha256"`) and `signatures` (a list); any other
+key, a missing key or a wrong type is a refusal of the file. Each entry is a closed object —
+exactly `sig_alg` (string), `public_key_b64` (string), `signature_b64` (string),
+`post_quantum` (boolean) — and an entry with any other key, a missing key, a wrong type, or
+a `post_quantum` that contradicts `sig_alg` (`true` iff `sig_alg` is `ml-dsa-65`) is a FAIL
+entry (the block is not `ok`). `scheme` is reconciled with the entries: `hybrid` requires at
+least one entry with a classical `sig_alg` (`ed25519`/`ecdsa-p256`) AND at least one `ml-dsa-65`
+entry; `classical-only` requires no `ml-dsa-65` entry; a block whose scheme does not match its
+entries is not `ok` (measured 2026-10-10 on 1.3.0: `scheme: "hybrid"` over a lone Ed25519
+signature was `producer_ok: true`). **Pinning:** an embedded key proves internal consistency, never
 authenticity. When the relying party supplies a pinned trust set
 (`{sig_alg: [public_key_b64, ...]}`), `producer_trusted` is `true` only if every
 present signature's key is pinned; a valid-but-unpinned signature MUST reject
@@ -201,7 +218,8 @@ flags: `require_producer`, `require_pq`, `require_anchor`.
    by SHA-256 (§1, §8), and unless `subject`, `created_utc`, `honest_scope` are strings
    (§1 MUSTs — 1.1.0 r5: a `…/2.0` pack used to be verified under the 1.0 rules, and a pack
    with no `honest_scope` produced a receipt with `honest_scope: null`). Recompute the digest (§3) → `digest_ok`.
-2. For EVERY artifact: parse `sd_jwt_compact` (its JSON under the §3.1 profile); verify the ES256 signature with
+2. For EVERY artifact: parse `sd_jwt_compact` (its JSON under the §3.1 profile); apply the JOSE rules of §9.2 to the
+   protected header (`crit` → RFC 7515 §4.1.11, unknown parameters ignored and reported); verify the ES256 signature with
    the snapshotted JWK over the JWS signing input; resolve disclosures
    fail-closed (unmatched, duplicate, or malformed disclosure → reject — for an UNMATCHED
    disclosure this is RFC 9901 §7.1 step 5 verbatim, "the SD-JWT MUST be rejected"; for an `_sd`
@@ -217,7 +235,11 @@ flags: `require_producer`, `require_pq`, `require_anchor`.
    KB-JWT is recorded as unverifiable, never treated as verified-green, and
    never fails the pack by itself — but a KB-JWT that verifies FALSE does, and a §3.1 profile
    violation in any of its three segments is that artifact's failure whether or not the holder
-   key is known: the strict segment rule does not depend on being able to check the signature). A verifier records the
+   key is known: the strict segment rule does not depend on being able to check the signature;
+   1.4.0, likewise independent of the holder key: the KB-JWT header MUST carry `typ: "kb+jwt"`
+   and `alg: "ES256"`, and its payload MUST carry `iat` (integer), `aud` (string), `nonce`
+   (string) and `sd_hash` (string) — RFC 9901 §4.3 REQUIRED and §7.3 step 5.d; a KB-JWT missing
+   any of them is that artifact's error, whatever `cnf` says). A verifier records the
    KB-JWT `aud`/`nonce`/`iat` as present-but-not-validated, as the sealed scope states: their expected
    values are transaction context an offline verifier cannot know.
 3. Recompute bindings (§4), compare → `bindings_ok`.
@@ -272,11 +294,20 @@ true/false/null).
 Run every `spec/vectors/ap2/<name>.json` under the policy in
 `<name>.expected.json` and reproduce the `normative` block exactly
 (`run_ap2_conformance.py` does this for the reference; exit 0 = conformant).
-The set contains two ACCEPTs (`valid_signed` — positive control — and `anchor_valid`,
-a real RFC 3161 token from a probe TSA whose certificate ships beside it) and six
+The set contains five ACCEPTs (`valid_signed` — positive control — and `anchor_valid`,
+a real RFC 3161 token from a probe TSA whose certificate ships beside it; since 1.4.0 also
+`header_param_ignored`, a signed header with an unregistered parameter that RFC 7515 §4 says to
+ignore, `kb_jwt_valid`, a holder-bound mandate whose KB-JWT verifies, and `key_jwk_member_ignored`,
+a snapshotted JWK with an unregistered member) and twelve
 REJECTs (stripped-signature downgrade, valid-but-unpinned producer, digest mismatch,
-anchor required-but-missing, anchor claimed-but-invalid, a real token for another digest). A vector
-whose `requires` tooling is absent is reported SKIP, honestly unverified.
+anchor required-but-missing, anchor claimed-but-invalid, a real token for another digest; since
+1.4.0: an unknown key at the top level, inside `rfc3161_timestamp`, inside an artifact entry and
+inside a producer-signature entry, a `crit` header parameter the verifier does not understand, and
+a KB-JWT without the `kb+jwt` type). A vector
+whose `requires` tooling is absent is reported SKIP, honestly unverified. When an
+`<name>.expected.json` carries a `report` block, a conformant verifier also reproduces it: today it
+holds `ignored`, the per-artifact list of names ignored under a standard's rule (§9.2), mapped
+onto the reference receipt's `artifacts[i].ignored`.
 Independent implementations: open a PR to be listed in the README conformance table.
 
 
@@ -288,3 +319,73 @@ SHA-256 of the UTF-8 bytes of the decoded JSON string value (not of the escaped 
 ```text
 Proves: these exact SD-JWT artifacts, with the snapshotted key material (see each key's provenance_class), verified at build time; the RFC 3161 token (if present) binds this digest to a TimeStampResp, and attests the TSA's clock only once the relying party has verified the TSA's signature (--tsa-cert): a self-issued token satisfies the binding alone. Does NOT prove the issuer authorised the key beyond what the provenance class states, does NOT confer eIDAS qualified-archive legal presumption, and does NOT by itself validate x5c chains to a trust anchor — that is an act of the relying party at verification time, with `--trust-anchor`, reported in `chain_verified` and in each artifact's `x5c_leaf` (SPEC §6.7): the x5c bytes are sealed inside the signed header, the validation RESULT never is — and never proves the truth of the recorded transaction itself. When a producer signature is present, it protects the SEALED CONTENT (the file minus the digest, the anchor block and the signatures themselves - so a removed or downgraded time anchor is caught only under a require-anchor policy), and authenticity ONLY for a relying party that has PINNED the producer public key out of band (an embedded key alone proves consistency, not authenticity), across the retention window (hybrid: a classical signature + FIPS-204 ML-DSA-65, surviving the quantum transition per NIST IR 8547); it does NOT retro-protect the underlying ES256 mandate signature - for the existed-before-a-quantum-adversary claim you still need a trusted time anchor (RFC 3161 / RFC 4998 renewal). 'valid' means each artifact verifies and the SEALED CONTENT is intact — NOT that the file as a whole is unaltered (the anchor block lies outside the digest), NOT that the mandates form a bound chain (read `bindings`) nor that self-asserted keys prove issuer identity (read `provenance_classes`/`self_asserted_only`). KB-JWT holder binding is verified when the issuer payload carries cnf.jwk; without cnf.jwk it is recorded as present-but-unverifiable, never painted green. KB-JWT aud/nonce/iat are RECORDED for the auditor, not validated — their expected values are transaction context this tool cannot know offline.
 ```
+
+## 9. Closed schema (NORMATIVE, 1.4.0)
+
+A verifier of this format is a precision instrument: whoever reads its `valid` trusts it. On
+2026-10-10 the 1.3.0 verifiers were measured accepting, with `valid: true` and no trace in the
+receipt, a key they had never heard of inside `rfc3161_timestamp`, inside `producer_signatures`
+and inside every `signatures[i]` entry (an unknown top-level key was caught only because the
+digest covers it — a pack SEALED with one verified). Nothing in this text said what to do with
+the unknown, so both implementations did the same thing: nothing. This section closes every
+object the format defines and states, for every object a standard defines, which rule of that
+standard applies. The principle: **a key the verifier does not understand is never silent** —
+in a closed object it is a refusal with a reason; in a standard's object it is ignored as the
+standard requires AND reported.
+
+### 9.1 Objects of this format — closed, unknown = refusal with a reason
+
+Every key of every object below is listed with its type; a key not in the list, a listed key
+of another type, or a listed MUST key that is absent, has the outcome in the last column.
+"Refusal" is a receipt with `valid: false` and `refused` naming the object and the key
+(`<object>: unknown key 'x' (SPEC §9.1)`); "artifact error" is `artifacts[i].error` for that
+artifact (the pack is not `valid`); "FAIL entry" is `status: FAIL` for that producer signature
+(the block is not `ok`, the pack is not `valid`). Keys are compared exactly (case-sensitive,
+after JSON unescaping — `"subj\u0065ct"` IS `subject`).
+
+| Object | Keys (type) | Unknown / wrong type / missing MUST |
+|---|---|---|
+| top level | `evidence_format` (string, MUST), `subject` (string, MUST), `created_utc` (string, MUST), `artifacts` (list, MUST), `bindings` (list; absent reads as `[]`), `honest_scope` (string, MUST), `evidence_digest_sha256` (string, MUST), `rfc3161_timestamp` (object), `producer_signatures` (object) | refusal |
+| `rfc3161_timestamp` | `anchored` (boolean, MUST), `tsr_b64` (string; when `anchored` is true and it is ABSENT the §6.4 rule applies: `rfc3161_verified: false`, not a refusal), `tsa_url` (string), `tsa` (string, 1.0–1.3 spelling), `note` (string) | refusal |
+| `producer_signatures` | `scheme` (`"hybrid"` or `"classical-only"`, MUST), `over` (`"evidence_digest_sha256"`, MUST), `signatures` (list, MUST) | refusal |
+| `producer_signatures.signatures[i]` | `sig_alg` (string, MUST), `public_key_b64` (string, MUST), `signature_b64` (string, MUST), `post_quantum` (boolean, MUST, `true` iff `sig_alg == "ml-dsa-65"`); an entry that is not an object | FAIL entry |
+| `bindings[i]` | `in` (string), `claim` (string), `commits_to` (string), `encoding` (`"hex"` or `"b64url"`) — all four MUST; an entry that is not an object | refusal |
+| `artifacts[i]` | `name` (non-empty string, MUST), `sd_jwt_compact` (string, MUST), `header` (object, MUST, canonically equal to the decoded protected header), `key` (object, MUST), `resolved_claims` (MUST, canonically equal to the recomputed claims), `kb_jwt` (object, MUST), `verified_at_build` (object, MUST) | artifact error (a `name` that is not a non-empty string stays a refusal, §2) |
+| `artifacts[i].key` | `jwk` (object, MUST), `provenance_class` (string in the §2 enum, MUST), `note` (string), `x5c_chain_sha256` (list of strings), `jwks_url` (string), `jwks_sha256` (string), `fetched_utc` (string) | artifact error |
+| `artifacts[i].kb_jwt` | `present` (boolean, MUST, equal to "the compact serialization ends with a KB-JWT"), `verified` (boolean or null), `signature_ok` (boolean), `sd_hash_ok` (boolean), `note` (string or null), `claims_recorded_not_validated` (object) | artifact error |
+| `artifacts[i].verified_at_build` | `signature_ok` (exactly `true`, MUST), `disclosures_ok` (exactly `true`, MUST) | artifact error |
+
+`resolved_claims` and `bindings` are closed by construction (they MUST equal a recomputation);
+the two rows above make the reason explicit instead of leaving a bare `claims_match: false`.
+
+### 9.2 Objects defined by a standard — the standard's rule, and a report
+
+| Object | Standard and its rule for the unknown | What this format does |
+|---|---|---|
+| issuer JWT protected header | RFC 7515 §4: "all Header Parameters not defined by this specification MUST be ignored when not understood", unless listed in `crit`; §4.1.11: a `crit` naming an extension the recipient does not understand makes the JWS INVALID; `crit` MUST NOT be `[]`, MUST NOT list registered names, duplicates, or names absent from the header | registered names: `alg`, `jku`, `jwk`, `kid`, `x5u`, `x5c`, `x5t`, `x5t#S256`, `typ`, `cty`, `crit` (RFC 7515 §4.1, RFC 7519 §5). This format understands NO extension: a `crit` that is present and well-formed is therefore always that artifact's error, and a malformed `crit` (not a list of strings, empty, duplicate, registered or absent names) is one too. Every other unregistered name is ignored and reported in `artifacts[i].ignored.header` |
+| `jwk` in the header, `key.jwk`, `cnf.jwk` | RFC 7517 §4: "Additional members can be present in the JWK; if not understood by implementations encountering them, they MUST be ignored" | registered members: `kty`, `use`, `key_ops`, `alg`, `kid`, `x5u`, `x5c`, `x5t`, `x5t#S256` (RFC 7517 §4) and `crv`, `x`, `y`, `d` (RFC 7518 §6.2). Others ignored and reported in `ignored.header_jwk` / `ignored.key_jwk` / `ignored.cnf_jwk` |
+| issuer JWT payload | RFC 7519 §4: "all claims that are not understood by implementations MUST be ignored" | every claim is RECORDED: the resolved payload is the pack's content and `resolved_claims` lists it in full, so nothing is reported twice; the SD-JWT shapes of RFC 9901 (`_sd`, `_sd_alg`, `...`) are imposed as in §3.1 |
+| `cnf` | RFC 7800 §3.1: "all confirmation members that are not understood by implementations MUST be ignored" | registered: `jwk`, `jwe`, `jku`, `kid` (RFC 7800 §3.1). Others ignored and reported in `ignored.cnf` |
+| KB-JWT header | RFC 7515 as above; RFC 9901 §4.3: `typ` REQUIRED, MUST be `kb+jwt`; `alg` REQUIRED | `typ` not exactly `"kb+jwt"` or `alg` not `"ES256"` is that artifact's error (§7.3 step 5.d); `crit` as above; other unregistered names ignored and reported in `ignored.kb_jwt_header` |
+| KB-JWT payload | RFC 7519 §4 (ignore); RFC 9901 §4.3: `iat`, `aud`, `nonce`, `sd_hash` REQUIRED | the four REQUIRED claims must be present with their RFC 9901 types (`iat` integer, the others strings) — absence or wrong type is that artifact's error; their VALUES are recorded, not validated (sealed scope). Registered names: `iss`, `sub`, `aud`, `exp`, `nbf`, `iat`, `jti` (RFC 7519 §4.1), `nonce`, `sd_hash` (RFC 9901). Others ignored and reported in `ignored.kb_jwt_claims` |
+
+`artifacts[i].ignored` is an object present on every artifact that verified; each slot above is
+a list of the ignored names sorted by code point and appears only when non-empty, so an
+artifact with nothing ignored carries `ignored: {}`. The report is informative for the verdict
+(it never changes `valid`) and normative for conformance when a vector's `expected.json` carries
+it (§7): two conformant verifiers report the same names.
+
+### 9.3 Generative proof
+
+`verifiers/schema_mutants.py` derives, from every conformance vector and from freshly signed
+packs, mutations at every level of every object listed in §9.1 and §9.2 — unknown keys (ASCII,
+Unicode, `__proto__`, `constructor`, empty, case-variants of known keys, escaped spellings),
+every known key replaced by each hostile type, duplicate keys, key-order permutations, escaped
+spellings of known keys, boundary numbers and out-of-grammar files — and computes each
+mutation's EXPECTED class from the two tables above, not from a verifier. Both verifiers must
+give that class and must agree with each other on every compared field. Run against the 1.3.0
+verifiers the same corpus is the positive control: measured 2026-10-10, of 12 818 mutations (full
+corpus) 8 186 passed SILENTLY on 1.3.0 in BOTH verifiers — `valid` unchanged, nothing in the receipt
+— and the two verifiers agreed with each other on every one of them (0 differential disagreements):
+agreement between two implementations by one author is not correctness. On 1.4.0: 12 818/12 818
+met their class, 0 disagreements (details in CHANGELOG 1.4.0).

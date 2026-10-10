@@ -256,7 +256,7 @@ class TestKbJwtHolderBinding(_Base):
         if tamper_sd_hash:
             sd_hash = "X" + sd_hash[1:]
         kb = _sign_jwt(holder_sk, {"alg": "ES256", "typ": "kb+jwt"},
-                       {"aud": "merchant", "nonce": "n1", "sd_hash": sd_hash})
+                       {"aud": "merchant", "nonce": "n1", "iat": 1760000000, "sd_hash": sd_hash})   # 1.4.0: iat/aud/nonce/sd_hash are REQUIRED (RFC 9901 §4.3)
         return presentation + kb
 
     def test_kb_verified_green(self):
@@ -286,7 +286,7 @@ class TestKbJwtHolderBinding(_Base):
         sd = _make_sd_jwt(self.sk, {"iss": "wallet"}, {"a": 1},
                           header_extra={"jwk": self.jwk})
         kb = _sign_jwt(hsk, {"alg": "ES256", "typ": "kb+jwt"},
-                       {"sd_hash": _b64u(hashlib.sha256(sd.encode()).digest())})
+                       {"aud": "m", "nonce": "n", "iat": 1760000000, "sd_hash": _b64u(hashlib.sha256(sd.encode()).digest())})
         ap2.build_evidence([{"name": "i", "sd_jwt": sd + kb}], self.out)
         v = ap2.verify_evidence(self.out)
         self.assertTrue(v["valid"], v)
@@ -309,12 +309,12 @@ class TestFullContextReviewFindings(_Base):
         sd = _make_sd_jwt(self.sk, {"iss": "wallet", "cnf": {"jwk": hjwk}},
                           {"amount": "1.00"}, header_extra={"jwk": self.jwk})
         kb = _sign_jwt(hsk, {"alg": "ES256", "typ": "kb+jwt"},
-                       {"aud": "merchant-x", "nonce": "n42",
+                       {"aud": "merchant-x", "nonce": "n42", "iat": 1760000000,
                         "sd_hash": _b64u(hashlib.sha256(sd.encode("ascii")).digest())})
         ap2.build_evidence([{"name": "i", "sd_jwt": sd + kb}], self.out)
         v = ap2.verify_evidence(self.out)
         rec = v["artifacts"][0]["kb_jwt"]["claims_recorded_not_validated"]
-        self.assertEqual(rec, {"aud": "merchant-x", "nonce": "n42"})
+        self.assertEqual(rec, {"aud": "merchant-x", "nonce": "n42", "iat": 1760000000})
         self.assertIn("not validated", ap2.HONEST_SCOPE)
 
 

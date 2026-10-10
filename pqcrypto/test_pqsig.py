@@ -60,9 +60,16 @@ class TestSigSuite(unittest.TestCase):
             dict(s, signature_b64=base64.b64encode(b"\x00" * 3309).decode()) if s["post_quantum"] else s
             for s in blk["signatures"]])
         self.assertFalse(S.verify_producer_block(forged, msg)["ok"])   # fail-closed
-        classical = dict(blk, signatures=[s for s in blk["signatures"] if not s["post_quantum"]])
-        rc = S.verify_producer_block(classical, msg)
-        self.assertTrue(rc["ok"] and not rc["pq_protected"])
+        classical_sigs = [s for s in blk["signatures"] if not s["post_quantum"]]
+        # 1.4.0 (SPEC §9.1): `scheme` is reconciled with the entries — "hybrid" over a lone classical signature is NOT ok
+        # (measured on 1.3.0: it was), "classical-only" over the same entries is
+        self.assertFalse(S.verify_producer_block(dict(blk, signatures=classical_sigs), msg)["ok"])
+        rc = S.verify_producer_block(dict(blk, scheme="classical-only", signatures=classical_sigs), msg)
+        self.assertTrue(rc["ok"] and not rc["pq_protected"] and rc["scheme_ok"])
+        # and an entry with a key outside the closed shape, or a post_quantum flag that contradicts sig_alg, is a FAIL entry
+        for bad in (dict(blk["signatures"][0], kid="k1"), dict(blk["signatures"][0], post_quantum=not blk["signatures"][0]["post_quantum"])):
+            r2 = S.verify_producer_block(dict(blk, signatures=[bad] + blk["signatures"][1:]), msg)
+            self.assertFalse(r2["ok"]); self.assertEqual(r2["results"][0]["status"], "FAIL")
 
 
 class TestAp2ProducerSignature(unittest.TestCase):

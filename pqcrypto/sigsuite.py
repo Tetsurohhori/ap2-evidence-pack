@@ -41,6 +41,7 @@ except Exception:  # pragma: no cover - old cryptography
 
 CLASSICAL = ("ed25519", "ecdsa-p256")
 POST_QUANTUM = ("ml-dsa-65",)
+ENTRY_KEYS = frozenset({"sig_alg", "public_key_b64", "signature_b64", "post_quantum"})   # SPEC §9.1: the closed shape of a signature entry
 KNOWN = CLASSICAL + POST_QUANTUM
 
 
@@ -272,8 +273,14 @@ def verify_producer_block(block: Dict, message: bytes, trusted: Optional[Dict[st
         alg = s.get("sig_alg")
         if not isinstance(alg, str):   # 1.1.0 r2: a non-string sig_alg was `trusted.get(list)` -> TypeError traceback under pins
             n_fail += 1; results.append({"sig_alg": None, "status": "FAIL", "post_quantum": False, "key_trusted": None}); all_keys_pinned = False; continue
-        pub = s.get("public_key_b64", "")
-        v = verify(alg, pub if isinstance(pub, str) else "", s.get("signature_b64", "") if isinstance(s.get("signature_b64"), str) else "", message)
+        # 1.4.0 — SPEC §9.1: the entry is a CLOSED object: exactly these four keys with these types, and `post_quantum` must say
+        # what `sig_alg` says (measured 2026-10-10 on 1.3.0: an entry with an extra key, or `post_quantum: true` on Ed25519,
+        # was PASS). An entry that breaks the shape is a FAIL entry, never a traceback and never a pass.
+        if (set(s) != ENTRY_KEYS or not isinstance(s.get("public_key_b64"), str) or not isinstance(s.get("signature_b64"), str)
+                or not isinstance(s.get("post_quantum"), bool) or s["post_quantum"] != (alg in POST_QUANTUM)):
+            n_fail += 1; results.append({"sig_alg": alg, "status": "FAIL", "post_quantum": alg in POST_QUANTUM, "key_trusted": None, "note": "entry is not the closed shape of SPEC §9.1"}); all_keys_pinned = False; continue
+        pub = s["public_key_b64"]
+        v = verify(alg, pub, s["signature_b64"], message)
         status = "PASS" if v is True else ("SKIP" if v is None else "FAIL")
         if v is True:
             n_pass += 1
@@ -294,7 +301,13 @@ def verify_producer_block(block: Dict, message: bytes, trusted: Optional[Dict[st
                         "post_quantum": alg in POST_QUANTUM, "key_trusted": key_trusted})
     # FAIL-CLOSED: ok requires at least one real PASS and zero failures AND zero unverifiable
     # (an all-SKIP block verified NOTHING -> must not be a green ok). `incomplete` is distinct.
-    ok = n_pass >= 1 and n_fail == 0 and n_skip == 0
+    # 1.4.0 — SPEC §5/§9.1: `scheme` is reconciled with the entries — "hybrid" needs a classical AND an ml-dsa-65 entry,
+    # "classical-only" needs no ml-dsa-65 entry (measured 2026-10-10 on 1.3.0: "hybrid" over a lone Ed25519 was ok: true)
+    algs = [r["sig_alg"] for r in results]
+    has_pq = any(a in POST_QUANTUM for a in algs); has_classical = any(a in CLASSICAL for a in algs)
+    scheme = block.get("scheme") if isinstance(block, dict) else None
+    scheme_ok = (scheme == "hybrid" and has_pq and has_classical) or (scheme == "classical-only" and not has_pq)
+    ok = n_pass >= 1 and n_fail == 0 and n_skip == 0 and scheme_ok
     trusted_ok = None if trusted is None else (bool(results) and all_keys_pinned and n_skip == 0)
     return {"ok": ok, "incomplete": n_skip > 0 and n_fail == 0, "pq_protected": pq,
-            "trusted": trusted_ok, "results": results, "scheme": block.get("scheme")}
+            "trusted": trusted_ok, "results": results, "scheme": scheme, "scheme_ok": scheme_ok}

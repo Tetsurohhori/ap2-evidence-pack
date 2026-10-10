@@ -442,6 +442,85 @@ def verify_es256(signing_input: bytes, signature: bytes, jwk: Dict) -> bool:
 
 PROVENANCE_CLASSES = frozenset({"supplied", "x5c_header", "jwk_header", "jwks_fetched"})
 
+# ── closed schema (SPEC §9, 1.4.0). Measured 2026-10-10 on 1.3.0: a key nobody defined, inside rfc3161_timestamp, the
+# producer block or a signature entry, was accepted with valid: true and no trace in the receipt. Every object this format
+# defines is now an exhaustive key list (§9.1: unknown = refusal / artifact error / FAIL entry, with the key named); every
+# object a standard defines follows that standard's rule for the unknown (§9.2: ignored AND reported).
+_JOSE_HEADER_REGISTERED = frozenset({"alg", "jku", "jwk", "kid", "x5u", "x5c", "x5t", "x5t#S256", "typ", "cty", "crit"})   # RFC 7515 §4.1, RFC 7519 §5
+_JWK_REGISTERED = frozenset({"kty", "use", "key_ops", "alg", "kid", "x5u", "x5c", "x5t", "x5t#S256", "crv", "x", "y", "d"})   # RFC 7517 §4, RFC 7518 §6.2
+_CNF_REGISTERED = frozenset({"jwk", "jwe", "jku", "kid"})                                                                     # RFC 7800 §3.1
+_KB_CLAIMS_REGISTERED = frozenset({"iss", "sub", "aud", "exp", "nbf", "iat", "jti", "nonce", "sd_hash"})                      # RFC 7519 §4.1, RFC 9901 §4.3
+
+
+def _is_str(v): return isinstance(v, str)
+def _is_bool(v): return isinstance(v, bool)
+def _is_obj(v): return isinstance(v, dict)
+def _is_list(v): return isinstance(v, list)
+def _is_str_or_none(v): return v is None or isinstance(v, str)
+def _is_bool_or_none(v): return v is None or isinstance(v, bool)
+def _is_true(v): return v is True
+def _is_list_of_str(v): return isinstance(v, list) and all(isinstance(x, str) for x in v)
+
+
+def _jkey(k) -> str:
+    return json.dumps(k, ensure_ascii=False)   # the same spelling as JSON.stringify in the JS verifier
+
+
+def _check_closed(obj, what: str, allowed: Dict[str, tuple], err=None):
+    """SPEC §9.1: `allowed` maps every key of the object to (predicate, description, required). An object that is not a
+    dict, a key outside `allowed`, a wrong type or a missing required key raises `err` (Ap2EvidenceError by default) with
+    the object and the key named — the same three messages the JS verifier produces."""
+    err = err or Ap2EvidenceError
+    if not isinstance(obj, dict):
+        raise err(f"{what} must be an object (SPEC §9.1)")
+    for k in obj:
+        if k not in allowed:
+            raise err(f"{what}: unknown key {_jkey(k)} (SPEC §9.1)")
+    for k, (pred, desc, required) in allowed.items():
+        if k in obj:
+            if not pred(obj[k]):
+                raise err(f"{what}: {k} must be {desc} (SPEC §9.1)")
+        elif required:
+            raise err(f"{what}: missing {k} (SPEC §9.1)")
+
+
+_TOP_KEYS = {"evidence_format": (_is_str, "a string", True), "subject": (_is_str, "a string", True), "created_utc": (_is_str, "a string", True),
+             "artifacts": (_is_list, "a list", True), "bindings": (_is_list, "a list", False), "honest_scope": (_is_str, "a string", True),
+             "evidence_digest_sha256": (_is_str, "a string", True), "rfc3161_timestamp": (_is_obj, "an object", False), "producer_signatures": (_is_obj, "an object", False)}
+_RFC3161_KEYS = {"anchored": (_is_bool, "a boolean", True), "tsr_b64": (_is_str, "a string", False),   # tsr_b64 ABSENT under anchored: §6.4 says rfc3161_verified false, not a refusal
+                 "tsa_url": (_is_str, "a string", False), "tsa": (_is_str, "a string", False), "note": (_is_str, "a string", False)}
+_PRODUCER_KEYS = {"scheme": (lambda v: v in ("hybrid", "classical-only"), '"hybrid" or "classical-only"', True),
+                  "over": (lambda v: v == "evidence_digest_sha256", '"evidence_digest_sha256"', True), "signatures": (_is_list, "a list", True)}
+_BINDING_KEYS = {"in": (_is_str, "a string", True), "claim": (_is_str, "a string", True), "commits_to": (_is_str, "a string", True),
+                 "encoding": (lambda v: v in ("hex", "b64url"), '"hex" or "b64url"', True)}
+_ARTIFACT_KEYS = {"name": (_is_str, "a string", True), "sd_jwt_compact": (_is_str, "a string", True), "header": (_is_obj, "an object", True),
+                  "key": (_is_obj, "an object", True), "resolved_claims": (lambda v: True, "", True), "kb_jwt": (_is_obj, "an object", True),
+                  "verified_at_build": (_is_obj, "an object", True)}
+_KEY_KEYS = {"jwk": (_is_obj, "an object", True), "provenance_class": (_is_str, "a string", True), "note": (_is_str, "a string", False),
+             "x5c_chain_sha256": (_is_list_of_str, "a list of strings", False), "jwks_url": (_is_str, "a string", False),
+             "jwks_sha256": (_is_str, "a string", False), "fetched_utc": (_is_str, "a string", False)}
+_KB_COPY_KEYS = {"present": (_is_bool, "a boolean", True), "verified": (_is_bool_or_none, "a boolean or null", False), "signature_ok": (_is_bool, "a boolean", False),
+                 "sd_hash_ok": (_is_bool, "a boolean", False), "note": (_is_str_or_none, "a string or null", False), "claims_recorded_not_validated": (_is_obj, "an object", False)}
+_VAB_KEYS = {"signature_ok": (_is_true, "true", True), "disclosures_ok": (_is_true, "true", True)}
+
+
+def _jose_header_ignored(header: Dict, what: str) -> List[str]:
+    """RFC 7515 §4: header parameters not understood MUST be ignored — unless named in `crit` (§4.1.11), where an extension
+    the recipient does not understand makes the JWS INVALID. This format understands no extension, so a well-formed `crit`
+    is always a rejection; a malformed one (not a non-empty list of distinct strings, naming a registered parameter or one
+    absent from the header — all "MUST NOT" for producers) is one too. Returns the ignored names, sorted, for the receipt."""
+    if "crit" in header:
+        crit = header["crit"]
+        if (not isinstance(crit, list) or not crit or any(not isinstance(c, str) for c in crit) or len(set(crit)) != len(crit)
+                or any(c in _JOSE_HEADER_REGISTERED or c not in header for c in crit)):
+            raise Ap2EvidenceError(f"{what}: malformed crit (RFC 7515 §4.1.11)")
+        raise Ap2EvidenceError(f"{what}: crit names extension(s) this verifier does not understand (RFC 7515 §4.1.11: the JWS is invalid)")
+    return sorted(k for k in header if k not in _JOSE_HEADER_REGISTERED)
+
+
+def _unknown_members(obj, registered) -> List[str]:
+    return sorted(k for k in obj if k not in registered) if isinstance(obj, dict) else []
+
 
 def _check_provenance(pc, parsed: Dict, key: Dict, trust_anchor: Optional[str] = None, at_time: Optional[str] = None):
     """1.1.0 r5: the provenance class is the field the honest_scope sends the relying party to, and it was the one field
@@ -627,12 +706,26 @@ def verify_kb_jwt(parsed: Dict, resolved_claims: Dict) -> Dict:
         raise Ap2EvidenceError("kb-jwt header and payload must be objects")
     if header.get("alg") != "ES256":
         raise Ap2EvidenceError(f"kb-jwt alg {header.get('alg')!r} unsupported (ES256 only)")
+    # 1.4.0 (SPEC §9.2): RFC 9901 §4.3 — typ REQUIRED and MUST be kb+jwt (§7.3 step 5.d); iat/aud/nonce/sd_hash REQUIRED with
+    # their types. Presence and type, never the values (the sealed scope: aud/nonce/iat are recorded, not validated). Checked
+    # whether or not the holder key is known, like the §3.1 segment profile.
+    if header.get("typ") != "kb+jwt":
+        raise Ap2EvidenceError("kb-jwt typ must be \"kb+jwt\" (RFC 9901 §4.3)")
+    ignored = {"kb_jwt_header": _jose_header_ignored(header, "kb-jwt header")}
+    for claim, pred, desc in (("iat", lambda v: isinstance(v, int) and not isinstance(v, bool), "an integer"), ("aud", _is_str, "a string"),
+                              ("nonce", _is_str, "a string"), ("sd_hash", _is_str, "a string")):
+        if claim not in payload:
+            raise Ap2EvidenceError(f"kb-jwt payload: missing {claim} (RFC 9901 §4.3)")
+        if not pred(payload[claim]):
+            raise Ap2EvidenceError(f"kb-jwt payload: {claim} must be {desc} (RFC 9901 §4.3)")
+    ignored["kb_jwt_claims"] = _unknown_members(payload, _KB_CLAIMS_REGISTERED)
     # 1.1.0 r2: `cnf` absent or an object, `cnf.jwk` absent or an object (an empty object is a holder key that fails to
     # parse, not "unknown"): present-with-null used to be an AttributeError here and "absent" in JS
     rc = resolved_claims if isinstance(resolved_claims, dict) else {}
     if "cnf" in rc and not isinstance(rc["cnf"], dict):
         raise Ap2EvidenceError("cnf must be an object")
     cnf = rc.get("cnf", {})
+    ignored["cnf"] = _unknown_members(cnf, _CNF_REGISTERED)   # RFC 7800 §3.1: not understood -> ignored, here reported
     _b64url_decode(seg[2])   # the §3.1 profile applies to all three segments even when the holder key is unknown: without
     # this, a KB-JWT whose signature segment is non-canonical base64url passed with valid: true, because the branch below
     # returns before the signature is ever decoded (found by probing the six uncovered KB-JWT branches)
@@ -640,17 +733,18 @@ def verify_kb_jwt(parsed: Dict, resolved_claims: Dict) -> Dict:
     # these are RECORDED whenever a KB-JWT is present — this branch returned before recording them, in both verifiers
     if "jwk" not in cnf:
         return {"present": True, "verified": None, "claims_recorded_not_validated": recorded,
-                "note": "no cnf.jwk in issuer payload — holder key unknown (declared)"}
+                "note": "no cnf.jwk in issuer payload — holder key unknown (declared)", "_ignored": ignored}
     jwk = cnf["jwk"]
     if not isinstance(jwk, dict):
         raise Ap2EvidenceError("cnf.jwk must be an object")
+    ignored["cnf_jwk"] = _unknown_members(jwk, _JWK_REGISTERED)   # RFC 7517 §4
     sig_ok = verify_es256(f"{seg[0]}.{seg[1]}".encode("ascii"),
                           _b64url_decode(seg[2]), jwk)
     presentation = parsed["compact"].rsplit("~", 1)[0] + "~"
     sd_hash_ok = payload.get("sd_hash") == _sha256_b64url(presentation.encode("ascii"))
     return {"present": True, "verified": bool(sig_ok and sd_hash_ok),
             "signature_ok": sig_ok, "sd_hash_ok": sd_hash_ok, "note": None,
-            "claims_recorded_not_validated": recorded}
+            "claims_recorded_not_validated": recorded, "_ignored": ignored}
 
 
 # ────────────────────────────────────────────────────────── bindings
@@ -719,8 +813,8 @@ def _rfc3161_stamp(digest_hex: str, tsa_url: str, timeout: int = 20) -> Dict:
         except Ap2EvidenceError:
             facts = {}
         if not (facts.get("granted") and facts.get("imprint") == digest_hex.lower()):
-            return {"anchored": False, "tsa": tsa_url, "note": "TSA reply is not a granted token for this digest"}
-        return {"anchored": True, "tsa": tsa_url, "tsr_b64": base64.b64encode(resp).decode()}
+            return {"anchored": False, "tsa_url": tsa_url, "note": "TSA reply is not a granted token for this digest"}
+        return {"anchored": True, "tsa_url": tsa_url, "tsr_b64": base64.b64encode(resp).decode()}   # 1.4.0: `tsa_url`, the vectors' spelling (`tsa` stays accepted, SPEC §9.1)
     except Exception as e:  # noqa: BLE001
         return {"anchored": False, "note": f"{type(e).__name__}: {str(e)[:80]}"}
     finally:
@@ -881,13 +975,16 @@ def build_evidence(artifacts: List[Dict], out_path: str,
     entries, for_bindings = [], []
     for a in artifacts:
         parsed = parse_sd_jwt(a["sd_jwt"])
+        if not isinstance(parsed["header"], dict) or not isinstance(parsed["payload"], dict):
+            raise Ap2EvidenceError(f"artifact {a['name']!r}: JWT header and payload must be objects")
+        _jose_header_ignored(parsed["header"], "JWT header")   # RFC 7515 §4.1.11 at build: refused at the source, like a bad signature
         key = _snapshot_key(parsed, supplied_jwk=keys.get(a["name"]),
                             jwks_url=jwks_urls.get(a["name"]))
         v = _verify_one(parsed, key)
         if not v["signature_ok"]:
             raise Ap2EvidenceError(f"artifact {a['name']!r}: ES256 signature INVALID "
                                    "(build refused — no evidence file for a red light)")
-        kb = verify_kb_jwt(parsed, v["resolved_claims"])
+        kb = verify_kb_jwt(parsed, v["resolved_claims"]); kb.pop("_ignored", None)   # the receipt's report, not part of the sealed copy
         if kb.get("verified") is False:
             raise Ap2EvidenceError(f"artifact {a['name']!r}: KB-JWT holder binding "
                                    "INVALID (build refused — no evidence file for a red light)")
@@ -997,6 +1094,17 @@ def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = Fa
         return refusal("rfc3161_timestamp.anchored must be a boolean")
     if "producer_signatures" in ev and not isinstance(ev["producer_signatures"], dict):
         return refusal("producer_signatures must be an object")
+    # 1.4.0 — SPEC §9.1: the top-level object, the anchor block, the producer block and every binding entry are CLOSED
+    try:
+        _check_closed(ev, "top level", _TOP_KEYS)
+        if "rfc3161_timestamp" in ev:
+            _check_closed(ev["rfc3161_timestamp"], "rfc3161_timestamp", _RFC3161_KEYS)
+        if "producer_signatures" in ev:
+            _check_closed(ev["producer_signatures"], "producer_signatures", _PRODUCER_KEYS)
+        for i, b in enumerate(ev.get("bindings", [])):
+            _check_closed(b, f"bindings[{i}]", _BINDING_KEYS)
+    except Ap2EvidenceError as e:
+        return refusal(str(e))
     e2 = {k: v for k, v in ev.items()
           if k not in ("evidence_digest_sha256", "rfc3161_timestamp", "producer_signatures")}
     recomputed_digest = hashlib.sha256(_canon(e2)).hexdigest()
@@ -1008,13 +1116,17 @@ def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = Fa
     if ts.get("anchored") and isinstance(ts.get("tsr_b64"), str):
         rfc = {"claimed": True, **_verify_rfc3161(ts["tsr_b64"], recomputed_digest, tsa_cert=tsa_cert)}
     elif ts.get("anchored"):
-        rfc = {"claimed": True, "verified": False, "note": "anchored claimed but tsr_b64 absent or not a string"}
+        rfc = {"claimed": True, "verified": False, "note": "anchored claimed but tsr_b64 absent"}
     proven_time = rfc.get("gen_time") if rfc.get("tsa_verified") is True else None
 
     art_results, all_ok = [], True
     for_bindings = []
     for a in ev["artifacts"]:
         try:
+            _check_closed(a, "artifact", _ARTIFACT_KEYS)   # 1.4.0 — SPEC §9.1: the entry, its key, its KB record and its attestation are CLOSED
+            _check_closed(a["key"], "artifact key", _KEY_KEYS)
+            _check_closed(a["kb_jwt"], "artifact kb_jwt", _KB_COPY_KEYS)
+            _check_closed(a["verified_at_build"], "artifact verified_at_build", _VAB_KEYS)
             compact = a["sd_jwt_compact"]
             if not isinstance(compact, str) or compact != compact.strip() or not compact.isascii():
                 raise Ap2EvidenceError("sd_jwt_compact must be the exact ASCII compact serialization (no surrounding whitespace)")
@@ -1027,15 +1139,25 @@ def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = Fa
             parsed = parse_sd_jwt(compact)
             if not isinstance(parsed["payload"], dict) or not isinstance(parsed["header"], dict):
                 raise Ap2EvidenceError("JWT header and payload must be objects")
+            if _canon(a["header"]) != _canon(parsed["header"]):   # 1.4.0 — SPEC §2: the informative copy must say what the signed header says
+                raise Ap2EvidenceError("artifact header copy differs from the decoded protected header (SPEC §2)")
+            if bool(parsed["kb_jwt"]) != a["kb_jwt"]["present"]:
+                raise Ap2EvidenceError("artifact kb_jwt.present contradicts the compact serialization (SPEC §9.1)")
+            # SPEC §9.2 — the standards' rule for the unknown: ignored, and REPORTED (crit: RFC 7515 §4.1.11, a rejection)
+            ignored = {"header": _jose_header_ignored(parsed["header"], "JWT header"),
+                       "header_jwk": _unknown_members(parsed["header"].get("jwk"), _JWK_REGISTERED),
+                       "key_jwk": _unknown_members(key["jwk"], _JWK_REGISTERED)}
             self_asserted, leaf_ident = _check_provenance(pc, parsed, key, trust_anchor, at_time=proven_time)   # r5: reconciled, not believed; r7/r8: it decides self_asserted_only; r9: at a proven time, and it names the leaf
             sig_ok = verify_es256(parsed["signing_input"], parsed["signature"], key["jwk"])
             resolved = resolve_disclosures(parsed["payload"], parsed["disclosures"])
             claims_ok = _canon(resolved) == _canon(a.get("resolved_claims"))
             kb = verify_kb_jwt(parsed, resolved)
+            ignored.update(kb.pop("_ignored", {}))
             art_results.append({"name": a.get("name"), "signature_ok": sig_ok,
                                 "claims_match": claims_ok, "kb_jwt": kb,
                                 "provenance_class": key.get("provenance_class"),
                                 "self_asserted": self_asserted,
+                                "ignored": {k: v for k, v in sorted(ignored.items()) if v},   # SPEC §9.2: only the non-empty slots
                                 **({"x5c_leaf": leaf_ident} if leaf_ident else {})})
             all_ok = (all_ok and sig_ok and claims_ok
                       and kb.get("verified") is not False)
@@ -1061,7 +1183,7 @@ def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = Fa
         pv = _sigsuite.verify_producer_block(
             prod, recomputed_digest.encode("ascii"),
             trusted=trusted_producer_keys)
-        producer = {"present": True, "scheme": pv["scheme"], "ok": pv["ok"],
+        producer = {"present": True, "scheme": pv["scheme"], "scheme_ok": pv["scheme_ok"], "ok": pv["ok"],
                     "pq_protected": pv["pq_protected"], "trusted": pv["trusted"],
                     "signatures": pv["results"]}
         if not pv["ok"]:

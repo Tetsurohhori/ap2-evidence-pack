@@ -1,0 +1,18 @@
+{
+ "description": "The same holder-bound mandate whose KB-JWT header has no typ. RFC 9901 §4.3: typ REQUIRED, MUST be kb+jwt (§7.3 step 5.d). The signature would verify; the artifact errors anyway and the pack is not valid (SPEC §9.2). On 1.3.0 this pack was valid: true.",
+ "normative": {
+  "bindings_ok": false,
+  "digest_ok": true,
+  "policy_ok": true,
+  "pq_protected": false,
+  "producer_ok": null,
+  "producer_present": false,
+  "producer_trusted": null,
+  "rfc3161_claimed": false,
+  "rfc3161_verified": null,
+  "self_asserted_only": true,
+  "valid": false
+ },
+ "policy": {},
+ "vector": "kb_jwt_typ_missing"
+}

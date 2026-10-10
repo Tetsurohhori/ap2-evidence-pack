@@ -27,7 +27,8 @@ class TestAp2ConformanceVectors(unittest.TestCase):
         r = rc.run()
         self.assertTrue(r["conformant"], r)
         statuses = {x["vector"]: x["status"] for x in r["results"]}
-        self.assertEqual(len(statuses), 8, statuses)   # 1.1.0: + anchor_valid (real token, probe TSA) and anchor_wrong_digest
+        self.assertEqual(len(statuses), 17, statuses)   # 1.1.0: + anchor_valid (real token, probe TSA) and anchor_wrong_digest; 1.4.0: + 9 closed-schema vectors (SPEC §9)
+        self.assertEqual(statuses.get("kb_jwt_valid"), "PASS", statuses)   # 1.4.0: the KB-JWT positive control
         # the set must contain the positive control — an always-reject verifier must fail
         self.assertEqual(statuses.get("valid_signed"), "PASS", statuses)
 
@@ -358,7 +359,7 @@ class TestAp2ConformanceVectors(unittest.TestCase):
             return json.loads(out.stdout)
         r = rc.run(verify_fn=js_verify)
         self.assertTrue(r["conformant"], r)
-        self.assertEqual(len(r["results"]), 8)
+        self.assertEqual(len(r["results"]), 17)
 
 
 def load_tests(loader, tests, pattern):

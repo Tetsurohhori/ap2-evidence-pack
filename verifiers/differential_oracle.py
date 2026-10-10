@@ -438,7 +438,7 @@ def _fresh_pack(base, sk, n, header_txt, payload_txt, resolved, disclosures=(), 
     jwk = jwk_pub
     ev = {"evidence_format": base["evidence_format"], "subject": "oracle r2", "created_utc": "2026-09-22T00:00:00Z",
           "artifacts": [{"name": "intent", "sd_jwt_compact": compact, "header": json.loads(ht) if isinstance(header_txt, str) else None, "key": {"jwk": jwk, "provenance_class": "jwk_header"},
-                         "resolved_claims": resolved, "kb_jwt": {"present": False}, "verified_at_build": {"signature_ok": True, "disclosures_ok": True}}],
+                         "resolved_claims": resolved, "kb_jwt": {"present": bool(kb)}, "verified_at_build": {"signature_ok": True, "disclosures_ok": True}}],   # 1.4.0: `present` must agree with the compact (SPEC §9.1)
           "bindings": [], "honest_scope": base["honest_scope"]}
     return rehash(ev)
 
