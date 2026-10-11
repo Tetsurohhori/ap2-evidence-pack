@@ -234,12 +234,13 @@ it prints the SDK commit and the `sd-jwt` version it actually loaded rather than
 AP2_SDK_PATH=/path/to/AP2/code/sdk/python python3 verifiers/sdk_crosscheck.py --hostile
 ```
 
-Measured on the eight vectors alone: **16 artifacts, same verdict, same claim names, same values.** Vectors plus the
-hostile corpus together (measured 2026-09-26 on 1.2.1): **138 artifacts compared (16 from the vectors, 122 hostile),
-89 claim-sets compared, 0 undeclared disagreements**. The three file-object cases of the oracle (a FIFO, a symlink to
+Re-measured 2026-10-11 on 1.4.0 (AP2 SDK `e1ea56db72a6`, `sd-jwt` 0.10.4). On the seventeen vectors alone: **26
+artifacts compared, 23 claim-sets compared, 0 disagreements** (two packs are refused before the mandate layer and one
+artifact at a closed object of SPEC §9.1, which the third stack never sees). Vectors plus the hostile corpus together:
+**142 artifacts compared (26 from the vectors, 116 hostile), 90 claim-sets compared, 0 undeclared disagreements**. The three file-object cases of the oracle (a FIFO, a symlink to
 `/dev/zero`, a directory) are not handed to this bench, which counts and prints them apart. And **none in the direction
 that would matter most — nothing this repository accepts and the third stack refuses**. One word needs care in that sentence: "refuses", for the third stack, means "raises". Of
-its 17 refusals here, 7 are deliberate and carry a message, and 10 are uncaught internal errors (`JSONDecodeError`,
+its 19 refusals here, 8 are deliberate and carry a message, and 11 are uncaught internal errors (`JSONDecodeError`,
 `'str' object has no attribute 'get'`, a failed tuple unpack). Fail-closed in effect, but not a verdict, and the bench
 prints that split rather than hiding it inside a total. The buckets that decide what counts as a disagreement at all
 are this repository's own; the one direction never bucketed away is "we accept, the third stack refuses".
@@ -257,10 +258,15 @@ that is the declared divergence below); a wrong key must flip the third stack's 
 actually REPORTED and turns the bench red is held by its own ablation: `AP2_XCHECK_SEED_DIVERGENCE=1` corrupts the key
 handed to the third stack, and the run must both print the seeded `[DIFF]` and exit non-zero. The workflow carries
 the bench and that ablation as their own steps; whether they are green is a fact about a run, and belongs in the
-release notes with the run behind it.
+release notes with the run behind it. Since 1.4.0 a refusal at a closed object of SPEC §9.1 is checked underneath before it
+is set aside: the bench rebuilds those objects as `build` writes them and compares the verdict that is left, and four
+more controls hold that step: closed objects broken around a token we refuse and the third stack accepts (asked for real);
+a recorded KB copy around a KB-JWT that fails, and an artifact only the closed layer refuses (the third stack's verdict
+supplied by the control, accept and refuse respectively, since no real case of either exists); a malformed key block,
+which stays this repository's own.
 
-**Every malformed input gets a verdict, never a traceback** (`verifiers/type_fuzz.py`). The count above — 10 of the
-third stack's 17 refusals being uncaught internal errors — raises the same question about this repository, and it is
+**Every malformed input gets a verdict, never a traceback** (`verifiers/type_fuzz.py`). The count above — 11 of the
+third stack's 19 refusals being uncaught internal errors — raises the same question about this repository, and it is
 the one question here that is this repository's business to answer. `test_hostile_files_are_refusal_receipts_never_tracebacks`
 already held it for ten hand-picked FILE-level shapes (eight malformed files, a missing path, a directory) against the
 Python reference called as a library, and the differential oracle already runs BOTH verifiers as subprocesses on the
@@ -277,8 +283,9 @@ single crash out of eight would pass a laxer test. Below that, it exits 2 withou
 
 **What the numbers do NOT cover,** stated so nobody reads them as more than they are. The third stack has no notion of
 the container (digest, bindings, producer signature, RFC 3161, policy, key provenance, and the `resolved_claims` the
-file records), so **32 packs** this repository refuses at the file level and **15 artifacts** it refuses at a layer
-the third stack has no notion of (key provenance, and the `resolved_claims` the file itself records) have no
+file records), so **38 packs** this repository refuses at the file level and **16 artifacts** it refuses at a layer
+the third stack has no notion of (key provenance, the `resolved_claims` the file itself records, and since 1.4.0 the
+closed objects of SPEC §9.1) have no
 third-stack opinion at all; **2 more artifacts** carry a key block that is not a key (`null`, or a `jwk` that is a
 list), so there was nothing to hand over and they are counted on their own line rather than vanishing from the
 denominator; **6 artifacts** are refused under the §3.1 profile this repository

@@ -60,6 +60,10 @@ def _sdk():
 # Why our stack refused an artifact decides what a divergence MEANS. Three of the four buckets below are not
 # disagreements about RFC 9901 at all: a layer the third stack does not have, a profile this repository declares
 # stricter, or a structural MUST the RFC's own verifier algorithm does not enforce. Only what falls through is a finding — a rule the RFC puts on every verifier that the third stack does not enforce.
+# 1.4.0: a refusal marked "(SPEC §9.1)" (a closed object of THIS format: the artifact entry, its key block, the recorded
+# KB copy, the build attestation) is NOT a bucket here. Those checks run BEFORE the token's own, so the reason they give
+# can stand in front of an RFC 9901 refusal the third stack disagrees with; `token_layer_view` looks underneath first.
+CLOSED_MARK = "(SPEC §9.1)"
 OURS_ONLY = ("provenance_class", "only EC/P-256")   # the pack's key block, no SD-JWT equivalent. "key.jwk must be
 #   an object" does not belong here: such an artifact never reaches this branch, it is counted in `nokey` above.
 # Exception types that are a crash inside the library rather than a refusal it meant to make.
@@ -111,6 +115,116 @@ def classify(err):
                                "3.e removes every _sd key): ignoring the malformed part is what the RFC prescribes, "
                                "rejecting it is this format's stricter choice")
     return "unknown", ""
+
+
+def token_layer_view(ev, idx):
+    """Our verdict on artifact `idx` with its closed objects (SPEC §9.1) rebuilt as `build` writes them: the `header`
+    copy decoded from the token, `kb_jwt` reduced to `present` as the token says, `verified_at_build` the two `true`s,
+    keys the key block does not define dropped. Returns (our_art, art). A §9.1 refusal is a layer the third stack has
+    no notion of ONLY if what is left underneath still gets the third stack's verdict: without this, a recorded KB copy
+    contradicting a KB-JWT whose signature or sd_hash fails hid any third stack that does not check them (measured).
+    """
+    import copy        # noqa: PLC0415
+    ev2 = copy.deepcopy(ev)
+    a = ev2["artifacts"][idx]
+    compact = a.get("sd_jwt_compact")
+    try:
+        parsed = ap2.parse_sd_jwt(compact)
+        a["header"], kb_present = parsed["header"], bool(parsed["kb_jwt"])
+    except Exception:   # noqa: BLE001 — the token's own refusal will come out of verify below
+        kb_present = isinstance(a.get("kb_jwt"), dict) and a["kb_jwt"].get("present") is True
+    a["kb_jwt"] = {"present": kb_present}
+    a["verified_at_build"] = {"signature_ok": True, "disclosures_ok": True}
+    if isinstance(a.get("key"), dict):
+        a["key"] = {k: v for k, v in a["key"].items() if k in ap2._KEY_KEYS}
+    for k in [k for k in a if k not in ap2._ARTIFACT_KEYS]:
+        del a[k]
+    arts = _verify_obj(ev2).get("artifacts") or []
+    under = arts[idx] if idx < len(arts) and isinstance(arts[idx], dict) else {"error": f"rebuilt pack refused {CLOSED_MARK}"}
+    return under, a
+
+
+def closed_layer_decision(under, under_src, their):
+    """What a §9.1 refusal means once the token underneath has been looked at (`token_layer_view`):
+    "ours_only"  — underneath, our verdict is the third stack's, or the key block itself is malformed: a layer it lacks;
+    "we_accept"  — underneath we accept and the third stack refuses: the direction never bucketed away;
+    "underneath" — underneath we refuse and the third stack accepts: judged on that reason, like any other refusal."""
+    under_ok, _ = ours_says(under, under_src)
+    if under_ok == their or CLOSED_MARK in str(under.get("error", "")):
+        return "ours_only"
+    if under_ok and not their:
+        return "we_accept"
+    return "underneath"
+
+
+def _verify_obj(ev):
+    import tempfile    # noqa: PLC0415
+    fd, path = tempfile.mkstemp(suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(ev, fh)
+        return ap2.verify_evidence(path)
+    finally:
+        os.unlink(path)
+
+
+def closed_layer_control(sdk_sdjwt, JWK, base_pack):
+    """Controls for the §9.1 handling: each case is a state in which the closed layer must NOT be the end of it, or must."""
+    import copy        # noqa: PLC0415
+    with open(base_pack, encoding="utf-8") as fh:
+        base = json.load(fh)
+    out, ok_all = [], True
+
+    def case(label, ev, their, want):
+        nonlocal ok_all
+        top = (_verify_obj(ev).get("artifacts") or [{}])[0]
+        under, src = token_layer_view(ev, 0)
+        got = closed_layer_decision(under, src, their)
+        good = CLOSED_MARK in str(top.get("error", "")) and got == want
+        ok_all &= good
+        out.append(f"  [{'PASS' if good else 'FAIL'}] {label}: {got} (want {want}); ours "
+                   f"{top.get('error', 'no error')!r}; underneath {under.get('error', 'no error')!r}")
+
+    # 4: every closed object of the entry broken at once (unknown key in the entry and in its key block, header copy
+    # gone, attestation emptied) around a rewritten disclosure the third stack ACCEPTS (RFC 9901 §7.1 step 5).
+    ev = copy.deepcopy(base)
+    art = ev["artifacts"][0]
+    compact = art["sd_jwt_compact"]
+    head, _, rest = compact.partition("~")
+    d = [x for x in rest.split("~") if x][0]
+    raw = json.loads(base64.urlsafe_b64decode(d + "=" * (-len(d) % 4)))
+    raw[-1] = "999999.00 EUR" if raw[-1] != "999999.00 EUR" else "1.00 EUR"
+    newd = base64.urlsafe_b64encode(json.dumps(raw, separators=(",", ":")).encode()).decode().rstrip("=")
+    art["sd_jwt_compact"] = compact.replace("~" + d + "~", "~" + newd + "~", 1)
+    art["x_unknown"] = True
+    art["key"]["x_unknown"] = True
+    art.pop("header", None)
+    art["verified_at_build"] = {}
+    their, _, _ = sdk_says(sdk_sdjwt, JWK, art["sd_jwt_compact"], art["key"]["jwk"])
+    case("control 4 closed objects broken around a token the third stack accepts and we refuse", ev, their, "underneath")
+
+    # 5: the recorded KB copy `build` writes, around a KB-JWT whose signature no longer verifies. Asked as if the third
+    # stack had accepted it (one that skips the key binding): underneath, our refusal must stand.
+    with open(os.path.join(ROOT, "spec", "vectors", "ap2", "kb_jwt_valid.json"), encoding="utf-8") as fh:
+        ev5 = json.load(fh)
+    a5 = ev5["artifacts"][0]
+    kb5 = ap2.verify_kb_jwt(ap2.parse_sd_jwt(a5["sd_jwt_compact"]), a5["resolved_claims"])
+    kb5.pop("_ignored", None)
+    a5["kb_jwt"] = kb5
+    c5 = a5["sd_jwt_compact"]
+    a5["sd_jwt_compact"] = c5[:-10] + ("A" if c5[-10] != "A" else "B") + c5[-9:]
+    case("control 5 a recorded KB copy around a KB-JWT that fails, third stack accepting", ev5, True, "underneath")
+
+    # 6: a known key of the key block with the wrong type is the pack's own layer, whatever the third stack says.
+    ev6 = copy.deepcopy(base)
+    ev6["artifacts"][0]["key"]["note"] = 5
+    case("control 6 a malformed key block stays ours-only", ev6, True, "ours_only")
+
+    # 7: only the closed layer refuses, and the third stack (as if) refuses the token: the direction never bucketed.
+    ev7 = copy.deepcopy(base)
+    ev7["artifacts"][0]["x_unknown"] = True
+    case("control 7 we accept underneath, third stack refusing", ev7, False, "we_accept")
+    return ok_all, out
 
 
 def has_kb(compact):
@@ -285,9 +399,13 @@ def interop_controls(sdk_sdjwt, JWK, base_pack):
         except Exception as e:   # noqa: BLE001
             out.append(f"  [SKIP] interop (decoys={decoys}): the third stack could not issue ({type(e).__name__})")
             continue
+        # 1.4.0 (SPEC §9.1): an artifact entry carries `header`, the decoded protected header of the issuer JWT,
+        # exactly as `build` writes it; the verifier checks it equals the signed one.
+        hseg = compact.split("~")[0].split(".")[0]
+        header = json.loads(base64.urlsafe_b64decode(hseg + "=" * (-len(hseg) % 4)))
         ev = {"evidence_format": base["evidence_format"], "subject": "issued by the third stack",
               "created_utc": "2026-01-01T00:00:00Z",
-              "artifacts": [{"name": "checkout", "sd_jwt_compact": compact,
+              "artifacts": [{"name": "checkout", "sd_jwt_compact": compact, "header": header,
                              "key": {"jwk": pub, "provenance_class": "supplied"},
                              "resolved_claims": theirs, "kb_jwt": {"present": False},
                              "verified_at_build": {"signature_ok": True, "disclosures_ok": True}}],
@@ -361,6 +479,9 @@ def main(argv):
           f"implementation (version read from the installed package, not written here)")
     print("layer compared: the SD-JWT mandate only (signature + disclosure resolution). Not the container.")
     controls_ok, lines = positive_controls(sdk_sdjwt, JWK, base)
+    c4_ok, c4_lines = closed_layer_control(sdk_sdjwt, JWK, base)
+    controls_ok &= c4_ok
+    lines.extend(c4_lines)
     print("positive controls (this bench must be able to go red):")
     for line in lines:
         print(line)
@@ -393,7 +514,7 @@ def main(argv):
             # make and it cannot. Counted apart, never as agreement.
             earlier += 1
             continue
-        for art, our_art in zip(ev.get("artifacts", []) or [], ours.get("artifacts", []) or []):
+        for idx, (art, our_art) in enumerate(zip(ev.get("artifacts", []) or [], ours.get("artifacts", []) or [])):
             if not isinstance(art, dict) or not isinstance(our_art, dict):
                 continue
             compact = art.get("sd_jwt_compact")
@@ -441,6 +562,20 @@ def main(argv):
                     findings.append((name, "we accept, third refuses", note))
                     print(f"  [DIFF] {name:46} ours=ACCEPT third=refuse — {note}")
                     continue
+                if CLOSED_MARK in str(our_art.get("error", "")):
+                    # A closed object of this format refused the artifact before its token was looked at. That is a
+                    # layer the third stack has no notion of only if the token underneath gets the third stack's verdict.
+                    under, under_src = token_layer_view(ev, idx)
+                    decision = closed_layer_decision(under, under_src, their)
+                    if decision == "ours_only":
+                        ours_only += 1
+                        continue
+                    if decision == "we_accept":
+                        diffs += 1
+                        findings.append((name, "we accept, third refuses", note))
+                        print(f"  [DIFF] {name:46} ours=ACCEPT under the closed layer, third=refuse — {note}")
+                        continue
+                    our_art = under   # judged on the reason underneath, like any other refusal
                 if has_kb(compact) and kb_expectations(compact) == (None, None):
                     # No readable aud/nonce, so the third stack cannot be asked about the key binding at all.
                     kbgap += 1
@@ -496,7 +631,7 @@ def main(argv):
         print(f"  [WARN] declared divergences that did not appear: {missing} — the declaration no longer describes "
               "this machine (a newer third-party release may have fixed it, or the case stopped being built)")
         diffs += len(missing)
-    print(f"artifacts from the eight vectors: {n_vec} | from the hostile corpus: {n - n_vec}")
+    print(f"artifacts from the conformance vectors: {n_vec} | from the hostile corpus: {n - n_vec}")
     print(f"the third stack refuses by RAISING: {raises_meant} deliberate refusals carrying a message, "
           f"{raises_uncaught} uncaught internal errors (fail-closed in effect, but not a verdict)")
     print(f"artifacts whose key block is not a key, so nothing could be handed to the third stack: {nokey}")
@@ -504,7 +639,7 @@ def main(argv):
     print(f"file-object cases not handed to this bench (not regular files; refused before reading by our two verifiers, "
           f"see the oracle): {len(not_files)} {not_files}")
     print("not disagreements, counted apart:")
-    print(f"  ARTIFACTS refused by us at a layer the third stack has no notion of (key provenance and\n    the `resolved_claims` the file itself records):                                {ours_only}")
+    print(f"  ARTIFACTS refused by us at a layer the third stack has no notion of (key provenance,\n    the `resolved_claims` the file itself records, the closed objects of SPEC §9.1): {ours_only}")
     print(f"  refused by us under the §3.1 profile this repository declares stricter:          {profile}")
     print(f"  KB-JWT whose aud/nonce could not be read, so its binding could not be compared: {kbgap}")
     print(f"  refused by us where the RFC's own verification algorithm ignores the malformed part:  {structural}")

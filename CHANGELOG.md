@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.4.0 — 2026-10-10 — closed schema: a key the verifier does not understand is never silent
+## 1.4.0 — 2026-10-11 — closed schema: a key the verifier does not understand is never silent
 
 **The finding (2026-10-10, measured on 1.3.0 = `6b2c7cf`).** Following an outside reader's remark on the anchor block
 (AP2 discussion #338), the two verifiers were given `valid_signed.json` with one key nobody had defined,
@@ -70,6 +70,21 @@ Positive control of the bench kept apart by design: one process loads one refere
 listed optional keys with valid values change nothing, `present` flipped, a non-string in a list of strings, recorded KB values,
 report order by code point — the cases the generative bench does not derive) — all OK; differential
 oracle, ablation and type-fuzz figures in the README. The new tests remove their own temporary directories.
+
+**Third-verifier bench (`verifiers/sdk_crosscheck.py`), adjusted to the closed schema.** Its interop control builds a
+pack by hand around tokens the third stack issues; without the `header` copy §9.1 now requires, both interop cases were
+refused (`artifact: missing header`), so the bench was red for a reason in the bench. It now writes the decoded protected
+header, as `build` does. A refusal marked `(SPEC §9.1)` is not the end of the comparison: those checks run before the
+token's own, so the bench rebuilds the artifact's closed objects as `build` writes them (`header` decoded from the token,
+`kb_jwt` reduced to `present`, `verified_at_build` the two `true`s, undefined keys dropped) and verifies again. The refusal
+is counted with the layers the third stack has no notion of only when the verdict underneath is the third stack's, or the
+key block itself is malformed; otherwise the reason underneath is judged like any other refusal, and "we accept
+underneath, the third stack refuses" is a disagreement. Without the first part, the new `unknown_key_artifact` vector was
+reported as a disagreement about RFC 9901; a plain `(SPEC §9.1)` bucket, tried first, would have hidden behind the KB
+copy `build` records a third stack that skips the KB-JWT signature (measured on a copy of the bench). Positive controls:
+the seeded divergence still turns the bench red, so does a copy without the §9.1 handling, and four built-in controls
+(4–7) hold the rebuilt view and its three outcomes (4 asks the third stack for real; 5 and 7 supply its verdict). Re-measured 2026-10-11: 142 artifacts compared, 90 claim-sets,
+0 undeclared disagreements (README).
 
 **Not changed, declared.** The issuer JWT payload is not "closed": every claim is the pack's content and is recorded in
 `resolved_claims` in full (RFC 7519 §4). The §9.2 report never changes `valid`. `sig_alg` values outside the three

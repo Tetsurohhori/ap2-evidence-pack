@@ -254,7 +254,7 @@ class TestKbJwtHolderBinding(_Base):
         presentation = sd            # termina gia' con '~'
         sd_hash = _b64u(hashlib.sha256(presentation.encode("ascii")).digest())
         if tamper_sd_hash:
-            sd_hash = "X" + sd_hash[1:]
+            sd_hash = ("Y" if sd_hash[0] == "X" else "X") + sd_hash[1:]   # a no-op 1 time in 64 when it began with "X"
         kb = _sign_jwt(holder_sk, {"alg": "ES256", "typ": "kb+jwt"},
                        {"aud": "merchant", "nonce": "n1", "iat": 1760000000, "sd_hash": sd_hash})   # 1.4.0: iat/aud/nonce/sd_hash are REQUIRED (RFC 9901 §4.3)
         return presentation + kb
