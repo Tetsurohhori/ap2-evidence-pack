@@ -155,9 +155,19 @@ const KEY_KEYS = { jwk: [T.obj, 1], provenance_class: [T.str, 1], note: [T.str, 
 const KB_COPY_KEYS = { present: [T.bool, 1], verified: [T.boolOrNull, 0], signature_ok: [T.bool, 0], sd_hash_ok: [T.bool, 0], note: [T.strOrNull, 0], claims_recorded_not_validated: [T.obj, 0] };
 const VAB_KEYS = { signature_ok: [T.isTrue, 1], disclosures_ok: [T.isTrue, 1] };
 const ENTRY_KEYS = new Set(["sig_alg", "public_key_b64", "signature_b64", "post_quantum"]);
+const byCodePoint = (a, b) => { const x = Array.from(a), y = Array.from(b); for (let i = 0; i < Math.min(x.length, y.length); i++) { const d = x[i].codePointAt(0) - y[i].codePointAt(0); if (d) return d; } return x.length - y.length; };
+function entryShapeNote(entry) {   // SPEC §9.1 FAIL entry: the same note as the reference's _entry_shape_note (unknown keys by code point, then missing)
+  const own = isObj(entry) ? Object.keys(entry) : [];
+  const unknown = own.filter((k) => !ENTRY_KEYS.has(k)).sort(byCodePoint), missing = [...ENTRY_KEYS].filter((k) => !own.includes(k)).sort(byCodePoint);
+  let note = "entry is not the closed shape of SPEC §9.1";
+  if (unknown.length) note += "; unknown key(s) " + JSON.stringify(unknown);
+  if (missing.length) note += "; missing " + JSON.stringify(missing);
+  return note;
+}
 function checkClosed(obj, what, allowed) {   // SPEC §9.1 — the same three messages as the reference's _check_closed
   if (!isObj(obj)) throw new Refused(what + " must be an object (SPEC §9.1)");
-  for (const k of Object.keys(obj)) if (!Object.hasOwn(allowed, k)) throw new Refused(what + ": unknown key " + JSON.stringify(k) + " (SPEC §9.1)");
+  const unknown = Object.keys(obj).filter((k) => !Object.hasOwn(allowed, k)).sort(byCodePoint);   // 1.4.1: the first by code point, as the reference
+  if (unknown.length) throw new Refused(what + ": unknown key " + JSON.stringify(unknown[0]) + " (SPEC §9.1)");
   for (const [k, [[pred, desc], required]] of Object.entries(allowed)) {
     if (k in obj) { if (!pred(obj[k])) throw new Refused(what + ": " + k + " must be " + desc + " (SPEC §9.1)"); }
     else if (required) throw new Refused(what + ": missing " + k + " (SPEC §9.1)"); }
@@ -240,10 +250,10 @@ function verifyProducerBlock(block, message, trusted) {
   const results = []; let pq = false, allPinned = trusted !== null, nPass = 0, nFail = 0, nSkip = 0;
   for (const s of Array.isArray(block?.signatures) ? block.signatures : []) {
     const alg = s?.sig_alg, pub = s?.public_key_b64 ?? "";
-    if (typeof alg !== "string") { nFail++; results.push({ sig_alg: null, status: "FAIL", post_quantum: false, key_trusted: null }); allPinned = false; continue; }   // r2: "constructor"/"__proto__" as sig_alg crashed the pin lookup on a prototype-bearing table
+    if (typeof alg !== "string") { nFail++; const r = { sig_alg: null, status: "FAIL", post_quantum: false, key_trusted: null }; if (isObj(s)) r.note = entryShapeNote(s); results.push(r); allPinned = false; continue; }   // 1.4.1: an object entry without a string sig_alg names its unknown and missing keys too   // r2: "constructor"/"__proto__" as sig_alg crashed the pin lookup on a prototype-bearing table
     // 1.4.0 — SPEC §9.1: the entry is a CLOSED object (exactly four keys, these types, post_quantum iff ml-dsa-65): otherwise a FAIL entry, never a pass
     const keys = Object.keys(s); if (!isObj(s) || keys.length !== 4 || keys.some((k) => !ENTRY_KEYS.has(k)) || !isStr(s.public_key_b64) || !isStr(s.signature_b64) || !isBool(s.post_quantum) || s.post_quantum !== (alg === "ml-dsa-65")) {
-      nFail++; results.push({ sig_alg: alg, status: "FAIL", post_quantum: alg === "ml-dsa-65", key_trusted: null, note: "entry is not the closed shape of SPEC §9.1" }); allPinned = false; continue; }
+      nFail++; results.push({ sig_alg: alg, status: "FAIL", post_quantum: alg === "ml-dsa-65", key_trusted: null, note: entryShapeNote(s) }); allPinned = false; continue; }
     const v = verifyProducer(alg, pub, s.signature_b64, message);
     const status = v === true ? "PASS" : v === null ? "SKIP" : "FAIL"; if (v === true) nPass++; else if (v === false) nFail++; else nSkip++;
     let keyTrusted = null; if (trusted !== null) { const allowed = Object.hasOwn(trusted, alg) ? trusted[alg] : []; keyTrusted = allowed.includes(pub); if (!keyTrusted) allPinned = false; }

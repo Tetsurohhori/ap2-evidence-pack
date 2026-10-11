@@ -362,6 +362,116 @@ class TestAp2ConformanceVectors(unittest.TestCase):
         self.assertEqual(len(r["results"]), 17)
 
 
+
+class TestSignatureEntryNamesTheKey(unittest.TestCase):
+    """SPEC §9 / CHANGELOG 1.4.0: a key nobody defined is never silent — a FAIL entry names it, identically in both verifiers."""
+
+    @unittest.skipUnless(shutil.which("node"), "node absent: the JS note is not measured")
+    def test_fail_entry_note_names_unknown_and_missing_keys(self):
+        import subprocess
+        with open(os.path.join(_HERE, "spec", "vectors", "ap2", "anchor_valid.json"), encoding="utf-8") as f:
+            ev = json.load(f)
+        e0 = ev["producer_signatures"]["signatures"][0]
+        e0.update({"zz_extra": 1, "1": 2, "\U0001F600k": 3, "\uFFFDk": 4, "zz": 5})   # integer-like key, non-BMP vs BMP order, a prefix after its extension
+        del e0["signature_b64"]
+        d = tempfile.mkdtemp()
+        try:
+            path = os.path.join(d, "p.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(ev, f, ensure_ascii=False)
+            py = ap2.verify_evidence(path)
+            js = json.loads(subprocess.run(["node", os.path.join(_HERE, "verifiers", "js", "ap2-verify.mjs"), path],
+                                           capture_output=True, text=True).stdout)
+        finally:
+            shutil.rmtree(d)
+        want = ('entry is not the closed shape of SPEC §9.1; unknown key(s) ["1","zz","zz_extra","\uFFFDk","\U0001F600k"]'
+                '; missing ["signature_b64"]')
+        for r in (py, js):
+            self.assertFalse(r["valid"])
+            self.assertEqual(r["producer_signatures"]["signatures"][0]["status"], "FAIL")
+            self.assertEqual(r["producer_signatures"]["signatures"][0]["note"], want)
+
+    def _both(self, ev):
+        import subprocess
+        d = tempfile.mkdtemp()
+        try:
+            path = os.path.join(d, "p.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(ev, f, ensure_ascii=False)
+            py = ap2.verify_evidence(path)
+            js = json.loads(subprocess.run(["node", os.path.join(_HERE, "verifiers", "js", "ap2-verify.mjs"), path],
+                                           capture_output=True, text=True).stdout)
+        finally:
+            shutil.rmtree(d)
+        return py, js
+
+    def _anchor_valid(self):
+        with open(os.path.join(_HERE, "spec", "vectors", "ap2", "anchor_valid.json"), encoding="utf-8") as f:
+            return json.load(f)
+
+    @unittest.skipUnless(shutil.which("node"), "node absent: the JS refusal is not measured")
+    def test_closed_object_names_the_same_first_key_in_both(self):
+        """1.4.1: with several unknown keys the refusal names the first by code point in both verifiers (1.4.0: Python named
+        the first in file order, JS the first of Object.keys, which puts array-index keys such as "1" first). Each case is
+        chosen so that file order, Object.keys order, UTF-16 order and code-point order do not all pick the same key."""
+        cases = [({"zz": 1, "\U0001F600k": 2, "\uFFFDk": 3, "1": 4}, "1"),       # file order: "zz"
+                 ({"zz": 1, "1": 2, "!x": 3}, "!x"),                               # Object.keys: "1"; file order: "zz"
+                 ({"\U0001F600k": 1, "\uFFFDk": 2}, "\uFFFDk")]                   # file order and UTF-16 order: the emoji
+        for extra, first in cases:
+            ev = self._anchor_valid()
+            ev["rfc3161_timestamp"].update(extra)
+            py, js = self._both(ev)
+            want = "rfc3161_timestamp: unknown key " + json.dumps(first, ensure_ascii=False) + " (SPEC §9.1)"
+            for r in (py, js):
+                self.assertFalse(r["valid"])
+                self.assertEqual(r["refused"], want, extra)
+
+    @unittest.skipUnless(shutil.which("node"), "node absent: the JS note is not measured")
+    def test_fail_entry_note_lists_several_missing_keys_by_code_point(self):
+        """1.4.1: the missing keys are sorted by code point (not the set's iteration order, which follows PYTHONHASHSEED,
+        nor the JS insertion order), with the same separators in both verifiers."""
+        ev = self._anchor_valid()
+        e1 = ev["producer_signatures"]["signatures"][1]
+        for k in ("public_key_b64", "signature_b64", "post_quantum"):
+            del e1[k]
+        py, js = self._both(ev)
+        want = 'entry is not the closed shape of SPEC §9.1; missing ["post_quantum","public_key_b64","signature_b64"]'
+        for r in (py, js):
+            self.assertEqual(r["producer_signatures"]["signatures"][1]["status"], "FAIL")
+            self.assertEqual(r["producer_signatures"]["signatures"][1]["note"], want)
+        import subprocess
+        code = ("import sys; sys.path.insert(0, %r); import sigsuite; "
+                "print(sigsuite._entry_shape_note({'sig_alg': 'ed25519'}))") % os.path.join(_HERE, "pqcrypto")
+        for seed in ("0", "1", "2", "3", "4", "5"):
+            out = subprocess.run([sys.executable, "-B", "-c", code], capture_output=True, text=True,
+                                 env=dict(os.environ, PYTHONHASHSEED=seed)).stdout.strip()
+            self.assertEqual(out, want, "PYTHONHASHSEED=" + seed)
+
+    @unittest.skipUnless(shutil.which("node"), "node absent: the JS note is not measured")
+    def test_fail_entry_without_string_sig_alg_names_the_keys(self):
+        """1.4.1: an entry whose sig_alg is absent or not a string is a FAIL entry that names its unknown and missing keys
+        too (in 1.4.0 it carried no note at all, in both verifiers)."""
+        for mutate, want in (
+                (lambda e: (e.pop("sig_alg"), e.update({"x_unknown": 1})),
+                 'entry is not the closed shape of SPEC §9.1; unknown key(s) ["x_unknown"]; missing ["sig_alg"]'),
+                (lambda e: e.update({"sig_alg": 5, "x_unknown": 1}),
+                 'entry is not the closed shape of SPEC §9.1; unknown key(s) ["x_unknown"]')):
+            ev = self._anchor_valid()
+            mutate(ev["producer_signatures"]["signatures"][0])
+            py, js = self._both(ev)
+            for r in (py, js):
+                self.assertFalse(r["valid"])
+                s0 = r["producer_signatures"]["signatures"][0]
+                self.assertEqual((s0["status"], s0["sig_alg"], s0.get("note")), ("FAIL", None, want))
+        for not_an_object in (5, "ed25519", [], None):   # an entry that is not an object has no keys to name: no note, in both
+            ev = self._anchor_valid()
+            ev["producer_signatures"]["signatures"][0] = not_an_object
+            py, js = self._both(ev)
+            for r in (py, js):
+                self.assertEqual(r["producer_signatures"]["signatures"][0], {"sig_alg": None, "status": "FAIL", "post_quantum": False,
+                                                                              "key_trusted": None}, not_an_object)
+
+
 def load_tests(loader, tests, pattern):
     # pull the out-of-glob suites into this CI-visible file
     for mod in ("test_acvp_mldsa65", "test_pqsig"):

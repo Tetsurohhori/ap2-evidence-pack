@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- Copyright 2026 Roberto Locatelli -->
 
-# ap2-evidence-pack — normative format v1.0 (2026-09-05), specification revision 1.4.0 (2026-10-10)
+# ap2-evidence-pack — normative format v1.0 (2026-09-05), specification revision 1.4.1 (2026-10-11)
 
 Status: **proposed format** (no standards body; normative for this repository), defined by the conformance vectors in
 `spec/vectors/ap2/` (each `<name>.json` pack + `<name>.expected.json`
@@ -338,9 +338,11 @@ standard requires AND reported.
 Every key of every object below is listed with its type; a key not in the list, a listed key
 of another type, or a listed MUST key that is absent, has the outcome in the last column.
 "Refusal" is a receipt with `valid: false` and `refused` naming the object and the key
-(`<object>: unknown key 'x' (SPEC §9.1)`); "artifact error" is `artifacts[i].error` for that
-artifact (the pack is not `valid`); "FAIL entry" is `status: FAIL` for that producer signature
-(the block is not `ok`, the pack is not `valid`). Keys are compared exactly (case-sensitive,
+(`<object>: unknown key "x" (SPEC §9.1)`; with several unknown keys, the first by Unicode code point —
+1.4.1); "artifact error" is `artifacts[i].error` for that artifact (the pack is not `valid`); "FAIL
+entry" is `status: FAIL` for that producer signature (the block is not `ok`, the pack is not
+`valid`), whose `note` names the unknown keys and the missing keys, each list sorted by code point
+(1.4.1: in 1.4.0 the note did not name them; an entry that is not an object has no keys and no note). Keys are compared exactly (case-sensitive,
 after JSON unescaping — `"subj\u0065ct"` IS `subject`).
 
 | Object | Keys (type) | Unknown / wrong type / missing MUST |

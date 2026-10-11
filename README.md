@@ -106,10 +106,10 @@ python3 spec/vectors/ap2/run_ap2_conformance.py   # exit 0 = conformant
 | `ap2_evidence.py` | Python 3 + `cryptography` | reference — conformant 17/17; ACVP ML-DSA-65 sigVer 9/9 |
 | `verifiers/js/ap2-verify.mjs` | Node with OpenSSL ≥ 3.5 for ML-DSA-65 (measured: Node 22.23.2 / OpenSSL 3.5.7 locally, Node 24 in CI), `node:crypto` only; on an older build ML-DSA-65 is SKIP = incomplete, never a pass, and the ML-DSA vectors are not measured (the JS conformance test skips, it does not pass); no TSA signature check — `tsa_verified` null | independent — conformant 17/17 on every normative field (and the `report` block) through `run_ap2_conformance.run(verify_fn=…)` (`test_ap2_conformance.py`) |
 
-**Closed schema (1.4.0, SPEC §9).** Measured on 1.3.0 on 2026-10-10: a key nobody had defined, written inside
+**Closed schema (1.4.0, SPEC §9; 1.4.1).** Measured on 1.3.0 on 2026-10-10: a key nobody had defined, written inside
 `rfc3161_timestamp`, `producer_signatures` or a `signatures[i]` entry, was `valid: true` in both verifiers with nothing in
 the receipt. Every object this format defines is now an exhaustive key list — unknown key, wrong type or missing MUST is a
-refusal / artifact error / FAIL entry that names the key — and every object a standard defines (JOSE header, JWK, `cnf`,
+refusal / artifact error / FAIL entry that names the key (a signature entry's FAIL names it since 1.4.1) — and every object a standard defines (JOSE header, JWK, `cnf`,
 KB-JWT) follows that standard's rule for the unknown (ignored) and REPORTS the ignored names in `artifacts[i].ignored`;
 `crit` makes the JWS invalid (RFC 7515 §4.1.11). The proof is generative: `verifiers/schema_mutants.py` derives from every
 vector and from freshly signed packs 12 818 mutations at every level of every object (unknown keys in eight spellings and

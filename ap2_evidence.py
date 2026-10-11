@@ -473,9 +473,9 @@ def _check_closed(obj, what: str, allowed: Dict[str, tuple], err=None):
     err = err or Ap2EvidenceError
     if not isinstance(obj, dict):
         raise err(f"{what} must be an object (SPEC §9.1)")
-    for k in obj:
-        if k not in allowed:
-            raise err(f"{what}: unknown key {_jkey(k)} (SPEC §9.1)")
+    unknown = sorted(k for k in obj if k not in allowed)   # 1.4.1: the first unknown key by code point, not by file order
+    if unknown:                                            # (JS Object.keys puts integer-like keys first: the two named different keys)
+        raise err(f"{what}: unknown key {_jkey(unknown[0])} (SPEC §9.1)")
     for k, (pred, desc, required) in allowed.items():
         if k in obj:
             if not pred(obj[k]):

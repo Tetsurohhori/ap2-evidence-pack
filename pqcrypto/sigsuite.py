@@ -42,6 +42,19 @@ except Exception:  # pragma: no cover - old cryptography
 CLASSICAL = ("ed25519", "ecdsa-p256")
 POST_QUANTUM = ("ml-dsa-65",)
 ENTRY_KEYS = frozenset({"sig_alg", "public_key_b64", "signature_b64", "post_quantum"})   # SPEC §9.1: the closed shape of a signature entry
+
+
+def _entry_shape_note(entry: Dict) -> str:
+    """SPEC §9.1 FAIL entry: name what breaks the closed shape — unknown keys (sorted by code point) and missing keys, in the
+    same spelling as the JS verifier (JSON with non-ASCII kept), so a key nobody defined is never reported without its name."""
+    unknown = sorted(k for k in entry if k not in ENTRY_KEYS)
+    missing = sorted(k for k in ENTRY_KEYS if k not in entry)
+    note = "entry is not the closed shape of SPEC §9.1"
+    if unknown:
+        note += "; unknown key(s) " + json.dumps(unknown, ensure_ascii=False, separators=(",", ":"))
+    if missing:
+        note += "; missing " + json.dumps(missing, ensure_ascii=False, separators=(",", ":"))
+    return note
 KNOWN = CLASSICAL + POST_QUANTUM
 
 
@@ -272,13 +285,14 @@ def verify_producer_block(block: Dict, message: bytes, trusted: Optional[Dict[st
             n_fail += 1; results.append({"sig_alg": None, "status": "FAIL", "post_quantum": False, "key_trusted": None}); all_keys_pinned = False; continue
         alg = s.get("sig_alg")
         if not isinstance(alg, str):   # 1.1.0 r2: a non-string sig_alg was `trusted.get(list)` -> TypeError traceback under pins
-            n_fail += 1; results.append({"sig_alg": None, "status": "FAIL", "post_quantum": False, "key_trusted": None}); all_keys_pinned = False; continue
+            # 1.4.1: this FAIL entry names the unknown and missing keys too (an entry without `sig_alg` was a FAIL entry with no note)
+            n_fail += 1; results.append({"sig_alg": None, "status": "FAIL", "post_quantum": False, "key_trusted": None, "note": _entry_shape_note(s)}); all_keys_pinned = False; continue
         # 1.4.0 — SPEC §9.1: the entry is a CLOSED object: exactly these four keys with these types, and `post_quantum` must say
         # what `sig_alg` says (measured 2026-10-10 on 1.3.0: an entry with an extra key, or `post_quantum: true` on Ed25519,
         # was PASS). An entry that breaks the shape is a FAIL entry, never a traceback and never a pass.
         if (set(s) != ENTRY_KEYS or not isinstance(s.get("public_key_b64"), str) or not isinstance(s.get("signature_b64"), str)
                 or not isinstance(s.get("post_quantum"), bool) or s["post_quantum"] != (alg in POST_QUANTUM)):
-            n_fail += 1; results.append({"sig_alg": alg, "status": "FAIL", "post_quantum": alg in POST_QUANTUM, "key_trusted": None, "note": "entry is not the closed shape of SPEC §9.1"}); all_keys_pinned = False; continue
+            n_fail += 1; results.append({"sig_alg": alg, "status": "FAIL", "post_quantum": alg in POST_QUANTUM, "key_trusted": None, "note": _entry_shape_note(s)}); all_keys_pinned = False; continue
         pub = s["public_key_b64"]
         v = verify(alg, pub, s["signature_b64"], message)
         status = "PASS" if v is True else ("SKIP" if v is None else "FAIL")

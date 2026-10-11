@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.4.1 — 2026-10-11 — a signature entry's FAIL names the key; the same key named in both verifiers
+
+**What 1.4.0 said and did not do (measured 2026-10-11 on the 1.4.0 release).** The 1.4.0 entry below said that a key
+outside a closed object is "a refusal, an artifact error or a FAIL entry that names the key". For a `signatures[i]` entry
+that was not true: the entry was `status: FAIL` and the pack not valid, but its `note` read only "entry is not the closed
+shape of SPEC §9.1", in both verifiers, without the key. The key was named in the anchor block, the producer block, the
+binding entries, the top level and the artifact objects. And with several unknown keys in one object, one of them an
+array index such as `"1"`, the two verifiers could name different keys: Python the first in file order, JS the first of
+`Object.keys`, which puts array-index keys first. An entry whose `sig_alg` was absent or not a string was a FAIL entry
+with no note at all, in both.
+
+**Now, identically in `pqcrypto/sigsuite.py` and `verifiers/js/ap2-verify.mjs`:** the FAIL entry's `note` names the
+unknown keys and the missing keys, each list sorted by Unicode code point (`…; unknown key(s) ["x"]; missing ["y"]`),
+also when `sig_alg` is absent or not a string (an entry that is not an object has no keys and no note); and every
+closed-object refusal names the first unknown key by code point (`ap2_evidence.py` and the JS verifier). SPEC §9.1 says
+both (revision 1.4.1). Tests (`test_ap2_conformance.py`, class `TestSignatureEntryNamesTheKey`, four tests, all failing
+on 1.4.0): a FAIL entry with an integer-like key, a non-BMP and a BMP key and a missing key gets the same note in both;
+three missing keys are listed by code point in both, and in Python under six hash seeds; an entry without a string
+`sig_alg` names its keys in both; an anchor block with several unknown keys is refused naming the same key in both, on
+three key sets that together tell code-point order apart from file order, `Object.keys` order and UTF-16 order. Verdicts do not change:
+every pack 1.4.0 refused or accepted, 1.4.1 refuses or accepts; only the text that names the key changes.
+
+**Completing the 1.4.0 list of behaviour that moves for packs already in the field** (measured 2026-10-11 by building packs
+with the 1.0.0–1.3.0 builders across their branches): besides what that entry lists, a KB-JWT whose `typ` is present
+but not exactly `kb+jwt` (`"JWT"`, `"KB+JWT"`), a KB-JWT whose `iat`, `aud`, `nonce` or `sd_hash` has the wrong type
+(`sd_hash` only without `cnf`: with `cnf` the builders already refused it), and a mandate or KB-JWT header carrying
+`crit`, well-formed or not (RFC 7515 §4.1.11), make the artifact fail under 1.4.x. Packs built with 1.0.x stopped verifying already in 1.1.0, when `honest_scope` was pinned to the
+canonical scope of the format (`honest_scope does not match`).
+
 ## 1.4.0 — 2026-10-11 — closed schema: a key the verifier does not understand is never silent
 
 **The finding (2026-10-10, measured on 1.3.0 = `6b2c7cf`).** Following an outside reader's remark on the anchor block
@@ -13,7 +42,8 @@ ever added a key. Nothing in the specification said what to do with the unknown,
 thing: nothing — and the differential oracle, which compares them with each other, had no way to see it.
 
 **The rule, written first (SPEC §9).** Every object this format defines is a CLOSED schema — an exhaustive key list with
-types — and a key outside it is a refusal, an artifact error or a FAIL entry that names the key (§9.1). Every object a
+types — and a key outside it is a refusal, an artifact error or a FAIL entry that names the key (§9.1) [corrected in 1.4.1: in 1.4.0 a
+signature entry's FAIL did not name the key; see 1.4.1]. Every object a
 standard defines follows that standard's rule for the unknown and REPORTS what it ignored (§9.2): JOSE header parameters
 (RFC 7515 §4, ignored; `crit`, RFC 7515 §4.1.11, the JWS is invalid — this format understands no extension), JWK members
 (RFC 7517 §4), `cnf` members (RFC 7800 §3.1), KB-JWT claims (RFC 7519 §4; `typ: kb+jwt` and `iat`/`aud`/`nonce`/`sd_hash`
@@ -42,7 +72,9 @@ conformance vector still verifies with the same normative block.
 Behaviour that moves for packs already in the field: an anchor block, producer block or binding entry with a key outside
 §9.1 is now refused; an empty producer block `{}` or one without `scheme`/`over`/`signatures` is a refusal (1.1.0 r1 made
 it "present, not ok"); a KB-JWT without `typ`/`iat`/`aud`/`nonce`/`sd_hash` makes its artifact fail (the three KB-JWT test
-fixtures of this repository lacked `iat` and were completed).
+fixtures of this repository lacked `iat` and were completed) [completed in 1.4.1: also a KB-JWT whose `typ` is not exactly
+`kb+jwt` or whose `iat`, `aud`, `nonce` or `sd_hash` has the wrong type, and a mandate or KB-JWT header carrying `crit`; see
+1.4.1].
 
 **Conformance vectors 8 → 17** (`spec/vectors/ap2/`, generator `make_vectors_closed_schema.py`; the five derived from
 `valid_signed` regenerate byte for byte, the four signed with fresh keys are frozen). ACCEPT: `header_param_ignored`,
