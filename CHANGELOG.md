@@ -27,6 +27,10 @@ conformance vector still verifies with the same normative block.
   artifact entry, `key`, `kb_jwt`, `verified_at_build` (artifact error); `signatures[i]` (FAIL entry);
 - the artifact's `header` copy must canonically equal the decoded protected header; `kb_jwt.present` must agree with the
   compact serialization; `verified_at_build` is exactly `{signature_ok: true, disclosures_ok: true}`;
+- (review of 2026-10-11) the recorded KB values `verified`, `signature_ok`, `sd_hash_ok` and `claims_recorded_not_validated`,
+  when present, must canonically equal what the verifier recomputes from the KB-JWT: on the first 1.4.0 build a key nobody
+  defined inside `claims_recorded_not_validated`, or a recorded `aud`/`verified` the KB-JWT contradicts, still verified
+  `valid: true` in both verifiers with nothing in the receipt (`test_ap2_closed_schema_gaps.py`);
 - producer entries: `post_quantum` must be `true` iff `sig_alg` is `ml-dsa-65`; `scheme` is reconciled with the entries
   (`hybrid` = a classical AND an `ml-dsa-65` entry, `classical-only` = no `ml-dsa-65`) — measured on 1.3.0: `scheme:
   "hybrid"` over a lone Ed25519 signature was `producer_ok: true`; the receipt gains `producer_signatures.scheme_ok`;
@@ -62,7 +66,9 @@ Positive control of the bench kept apart by design: one process loads one refere
 
 **Tests on the release commit** (Python 3.11.2, Node 22.23.2 / OpenSSL 3.5.7): `test_ap2_evidence.py` 30, `test_ap2_conformance.py`
 27, `test_ap2_schema_mutants.py` 2 (new), `test_packaging.py` 6, `test_stamp_tsa_locale.py` 2, `pqcrypto/test_pqsig.py` 13
-(one extended: scheme reconciliation and the closed entry), `pqcrypto/test_acvp_mldsa65.py` 1 — all OK; differential
+(one extended: scheme reconciliation and the closed entry), `pqcrypto/test_acvp_mldsa65.py` 1, `test_ap2_closed_schema_gaps.py` 5 (new on review:
+listed optional keys with valid values change nothing, `present` flipped, a non-string in a list of strings, recorded KB values,
+report order by code point — the cases the generative bench does not derive) — all OK; differential
 oracle, ablation and type-fuzz figures in the README. The new tests remove their own temporary directories.
 
 **Not changed, declared.** The issuer JWT payload is not "closed": every claim is the pack's content and is recorded in

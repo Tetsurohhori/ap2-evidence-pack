@@ -502,6 +502,7 @@ _KEY_KEYS = {"jwk": (_is_obj, "an object", True), "provenance_class": (_is_str, 
 _KB_COPY_KEYS = {"present": (_is_bool, "a boolean", True), "verified": (_is_bool_or_none, "a boolean or null", False), "signature_ok": (_is_bool, "a boolean", False),
                  "sd_hash_ok": (_is_bool, "a boolean", False), "note": (_is_str_or_none, "a string or null", False), "claims_recorded_not_validated": (_is_obj, "an object", False)}
 _VAB_KEYS = {"signature_ok": (_is_true, "true", True), "disclosures_ok": (_is_true, "true", True)}
+_KB_RECOMPUTED = ("verified", "signature_ok", "sd_hash_ok", "claims_recorded_not_validated")   # each, when present in the copy, MUST equal the recomputation (SPEC §9.1)
 
 
 def _jose_header_ignored(header: Dict, what: str) -> List[str]:
@@ -1152,6 +1153,9 @@ def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = Fa
             resolved = resolve_disclosures(parsed["payload"], parsed["disclosures"])
             claims_ok = _canon(resolved) == _canon(a.get("resolved_claims"))
             kb = verify_kb_jwt(parsed, resolved)
+            for k in _KB_RECOMPUTED:   # SPEC §9.1 (NEMESIS 2026-10-11): a recorded KB value that says something else is that artifact's error
+                if k in a["kb_jwt"] and (k not in kb or _canon(a["kb_jwt"][k]) != _canon(kb[k])):
+                    raise Ap2EvidenceError(f"artifact kb_jwt.{k} contradicts the KB-JWT (SPEC §9.1)")
             ignored.update(kb.pop("_ignored", {}))
             art_results.append({"name": a.get("name"), "signature_ok": sig_ok,
                                 "claims_match": claims_ok, "kb_jwt": kb,
