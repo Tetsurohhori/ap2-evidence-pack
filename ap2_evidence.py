@@ -903,7 +903,8 @@ def parse_timestamp_resp(tsr: bytes, _partial: Optional[Dict] = None) -> Dict:
         gt = tsr[tstc[4][1]:tstc[4][2]].decode("ascii", "replace")
         if re.fullmatch(r"[0-9]{14}(\.[0-9]+)?Z", gt):   # r9: ASCII digits, as the JS verifier
             gen_time = gt
-    return {"granted": granted, "imprint": tsr[mic[1][1]:mic[1][2]].hex(), "gen_time": gen_time}
+    return {"granted": granted, "imprint": tsr[mic[1][1]:mic[1][2]].hex(), "gen_time": gen_time,
+            "tst_info": bytes(tsr[wrap[1]:wrap[2]])}   # 1.5.0 (SPEC §3.3): the TSTInfo the TSA signed = the identity of the anchor
 
 
 def _verify_rfc3161(tsr_b64: str, expected_digest_hex: str, timeout: int = 15, tsa_cert: Optional[str] = None) -> Dict:
@@ -1039,23 +1040,50 @@ def add_anchor(path: str, tsa_url: str) -> Dict:
     certificate ages out). The token is requested for the digest RECOMPUTED from the sealed content, and the pack is
     refused unchanged when that differs from the declared digest (stamping a pack that does not verify would attest
     nothing). The digest and the producer signatures do not change: `anchors` lies outside them. Written atomically."""
-    ev = read_evidence_file(path)
-    if ev.get("evidence_format") != EVIDENCE_FORMAT:
-        raise Ap2EvidenceError(f"evidence_format must be {EVIDENCE_FORMAT!r}")
-    digest = hashlib.sha256(_canon({k: v for k, v in ev.items() if k not in _DIGEST_EXCLUDED})).hexdigest()
-    if digest != ev.get("evidence_digest_sha256"):
-        raise Ap2EvidenceError("the declared evidence_digest_sha256 does not match the sealed content: not stamped")
-    if "anchors" in ev and not (isinstance(ev["anchors"], list) and ev["anchors"]):
-        raise Ap2EvidenceError("anchors must be a non-empty list (SPEC §3.3): not stamped")
-    st = _rfc3161_stamp(digest, tsa_url)
-    if not st.get("anchored"):
-        raise Ap2EvidenceError(f"no anchor obtained: {st.get('note')}")
-    ev.setdefault("anchors", []).append({"mechanism": "rfc3161", "tsr_b64": st["tsr_b64"], "tsa_url": tsa_url})
-    tmp = path + ".tmp-stamp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(ev, f, ensure_ascii=False, indent=1, sort_keys=True)
-    os.replace(tmp, path)
-    return {"out": path, "evidence_digest_sha256": digest, "anchors": len(ev["anchors"])}
+    import tempfile
+    path = os.path.realpath(path)   # a symlink is followed: the pack it names is stamped, the link stays a link
+    try:
+        dfd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+    except OSError as e:
+        raise Ap2EvidenceError(f"cannot open the pack's directory: {type(e).__name__}") from e
+    try:
+        try:   # the read-modify-write under an exclusive lock on the directory: measured on b3edfc8, six concurrent stamps of one
+            import fcntl   # pack all reported success and the file kept ONE anchor (the others lost), two raised FileNotFoundError
+            fcntl.flock(dfd, fcntl.LOCK_EX)
+        except ImportError:   # no fcntl (Windows): no lock — concurrent stamps of one pack are not supported there (declared)
+            pass
+        ev = read_evidence_file(path)
+        if ev.get("evidence_format") != EVIDENCE_FORMAT:
+            raise Ap2EvidenceError(f"evidence_format must be {EVIDENCE_FORMAT!r}")
+        digest = hashlib.sha256(_canon({k: v for k, v in ev.items() if k not in _DIGEST_EXCLUDED})).hexdigest()
+        if digest != ev.get("evidence_digest_sha256"):
+            raise Ap2EvidenceError("the declared evidence_digest_sha256 does not match the sealed content: not stamped")
+        if "anchors" in ev and not (isinstance(ev["anchors"], list) and ev["anchors"]):
+            raise Ap2EvidenceError("anchors must be a non-empty list (SPEC §3.3): not stamped")
+        st = _rfc3161_stamp(digest, tsa_url)
+        if not st.get("anchored"):
+            raise Ap2EvidenceError(f"no anchor obtained: {st.get('note')}")
+        ev.setdefault("anchors", []).append({"mechanism": "rfc3161", "tsr_b64": st["tsr_b64"], "tsa_url": tsa_url})
+        mode = os.stat(path).st_mode & 0o7777
+        tmp = None
+        try:   # a fresh, unpredictable name created O_EXCL (a fixed name could be a planted symlink: measured, it overwrote its target)
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".ap2-stamp-", suffix=".tmp")
+            os.fchmod(fd, mode)   # the pack keeps its permissions (0600 became 0644)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(ev, f, ensure_ascii=False, indent=1, sort_keys=True)
+                f.flush(); os.fsync(f.fileno())
+            os.replace(tmp, path); tmp = None
+        except OSError as e:
+            raise Ap2EvidenceError(f"cannot write the stamped pack: {type(e).__name__}: not stamped") from e
+        finally:
+            if tmp is not None:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+        return {"out": path, "evidence_digest_sha256": digest, "anchors": len(ev["anchors"])}
+    finally:
+        os.close(dfd)
 
 
 def sign_evidence(path, identity=None, classical_alg="ed25519"):
@@ -1091,6 +1119,16 @@ def _chain_verdict(trust_anchor, art_results):
     return all(x.get("chain_verified") is True for x in attempted)
 
 
+def _anchor_identity(tsr_b64: str) -> bytes:
+    """SPEC §3.3: the identity of an anchor is the TSTInfo the TSA signed (eContent of the token), not the bytes around it.
+    Called only on a token whose binding verified, i.e. that parsed; the decoded bytes are the fallback for a stubbed check."""
+    raw = _sigsuite._unb64(tsr_b64)
+    try:
+        return b"tst:" + parse_timestamp_resp(raw)["tst_info"]
+    except Ap2EvidenceError:
+        return b"raw:" + raw
+
+
 def _gt_key(gt: str):
     """Order key of a GeneralizedTime `YYYYMMDDHHMMSS[.f]Z` (the only shape parse_timestamp_resp reports): whole seconds, then
     the fraction as a number — a string comparison put "…00.5Z" before "…00Z" ('.' < 'Z')."""
@@ -1104,6 +1142,8 @@ def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = Fa
     """OFFLINE re-verification from the evidence file alone: digest, every signature with
     the SNAPSHOTTED key, every disclosure, every binding, and the RFC 3161 token's binding
     (status + imprint; the TSA itself only with `tsa_cert`, via openssl). Fail-closed."""
+    if min_anchors is not None and (type(min_anchors) is not int or min_anchors < 1):   # SPEC §3.3: an integer >= 1 —
+        raise ValueError(f"min_anchors must be an integer >= 1 (got {min_anchors!r})")      # 0, NaN or "2" never weakens the policy in silence
     try:
         ev = read_evidence_file(path)
     except Ap2EvidenceError as e:   # 1.1.0: a hostile or unreadable file is a refusal receipt, never a traceback
@@ -1178,13 +1218,16 @@ def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = Fa
     elif ts.get("anchored"):
         rfc = {"claimed": True, "verified": False, "note": "anchored claimed but tsr_b64 absent"}
     # 1.5.0 — SPEC §3.3: every `anchors` entry checked like the block above; COUNTING = binding verified (+ TSA-verified when
-    # --tsa-cert was given); DISTINCT = different token bytes (a copied token is one anchor); any failing claim fails the pack
+    # --tsa-cert was given); DISTINCT = a different signed TSTInfo (a copied token is one anchor, however it is wrapped);
+    # any failing claim fails the pack
     anchor_results = [{"mechanism": an["mechanism"], "claimed": True, **_verify_rfc3161(an["tsr_b64"], recomputed_digest, tsa_cert=tsa_cert)}
                       for an in ev.get("anchors", [])]
     counted, earliest = set(), None
     for r_, tok in ([(rfc, ts.get("tsr_b64"))] if rfc.get("claimed") else []) + [(r_, an["tsr_b64"]) for r_, an in zip(anchor_results, ev.get("anchors", []))]:
         if r_.get("verified") is True and (tsa_cert is None or r_.get("tsa_verified") is True):
-            counted.add(_sigsuite._unb64(tok))
+            # the TSTInfo the TSA signed, not the wrapper: the same token re-wrapped (bytes after the TimeStampResp, a status
+            # string, a longer length) verified as a second anchor under --tsa-cert --min-anchors 2 (measured on b3edfc8)
+            counted.add(_anchor_identity(tok))
             if r_.get("tsa_verified") is True and r_.get("gen_time") and (earliest is None or _gt_key(r_["gen_time"]) < _gt_key(earliest)):
                 earliest = r_["gen_time"]
     anchors_verified = len(counted)
@@ -1329,7 +1372,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     b.add_argument("--subject", default="agentic-payment mandate evidence")
     st = sub.add_parser("stamp", allow_abbrev=False, add_help=False)   # 1.5.0 — SPEC §3.3: add an anchor to an existing pack
     st.add_argument("evidence")
-    st.add_argument("--tsa", required=True, help="RFC 3161 TSA URL: append its token to `anchors`")
+    st.add_argument("--tsa", required=True, action="append", help="RFC 3161 TSA URL: append its token to `anchors` (exactly one per run)")
     v = sub.add_parser("verify", allow_abbrev=False, add_help=False)
     v.add_argument("evidence")
     v.add_argument("--trusted-producer-key", action="append", default=None, metavar="ALG=B64",
@@ -1397,8 +1440,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if a.cmd == "stamp":
         if a.evidence == "" or a.evidence.startswith("-"):
             p.error(f"evidence path needs a value (got {a.evidence!r})")
+        if len(a.tsa) != 1:   # measured on b3edfc8: `--tsa A --tsa B` stamped B only, exit 0, A dropped in silence
+            p.error(f"stamp takes exactly one --tsa (got {len(a.tsa)}): run it once per TSA")
         try:
-            print(json.dumps(add_anchor(a.evidence, a.tsa), indent=1))
+            print(json.dumps(add_anchor(a.evidence, a.tsa[0]), indent=1))
             return 0
         except Ap2EvidenceError as e:
             print(json.dumps({"error": str(e)}), file=sys.stderr)

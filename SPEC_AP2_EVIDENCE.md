@@ -12,7 +12,8 @@ has an exhaustive key list, and a key outside it is a refusal with a reason — 
 accepted; objects defined by a standard (JOSE header, JWT claims, JWK, `cnf`) follow that
 standard's rule for the unknown (ignore) and the ignored names are REPORTED in the receipt.
 The `evidence_format` string is unchanged: 1.4.0 narrows what is accepted, it does not change
-the sealed content or the digest of a conformant pack (every 1.0–1.3 vector still verifies). An independent verifier claims conformance by reproducing every
+the sealed content or the digest of a conformant pack (every 1.1–1.3 vector still verifies; the 1.0.x vectors stopped
+verifying in 1.1.0, when `honest_scope` was pinned). An independent verifier claims conformance by reproducing every
 vector's `normative` block from this text alone — see §7. Reference
 implementation: `ap2_evidence.py` (informative, not normative).
 
@@ -172,14 +173,17 @@ refusal (§9.1). `anchors` is the place for them.
 - The receipt lists one result per entry in `anchors` (same order), each carrying `mechanism`.
 - **Counting.** An anchor COUNTS when its binding is verified and, when the relying party passed `--tsa-cert`, its TSA
   signature is verified too. `anchors_verified` (normative, an integer) is the number of DISTINCT counting anchors
-  among the `rfc3161_timestamp` token and the `anchors` entries; two entries are the same anchor when their decoded token
-  bytes are equal (a copied token is one anchor, not two). Distinct tokens from the same TSA share that TSA's key: this
+  among the `rfc3161_timestamp` token and the `anchors` entries; two entries are the same anchor when the TSTInfo they
+  carry — the eContent the TSA signed (RFC 3161 §2.4.2) — is byte-for-byte equal: a copied token is one anchor however it
+  is re-wrapped (bytes after the TimeStampResp, a status string, a longer length encoding leave the signature valid).
+  Distinct tokens from the same TSA share that TSA's key: this
   count does not establish that they fail independently — a relying party that needs that reads `gen_time` and the TSA
   of each entry (declared).
 - `rfc3161_claimed` is true when the `rfc3161_timestamp` block is anchored OR `anchors` holds an `rfc3161` entry;
   `rfc3161_verified` is `null` when nothing is claimed, `false` when ANY claimed RFC 3161 token fails its binding, and
   `true` otherwise. On a pack without `anchors` both fields are what 1.4.x reports.
-- **Policy.** `min_anchors` (a verifier input, integer ≥ 1): `policy_ok` is false when `anchors_verified` < `min_anchors`.
+- **Policy.** `min_anchors` (a verifier input, integer ≥ 1; any other value is an error of the caller, never a weaker
+  policy): `policy_ok` is false when `anchors_verified` < `min_anchors`.
   `require_anchor` is `min_anchors = 1` when no larger value is given. How many anchors a relying party requires is its
   decision; the pack never states it.
 - The time at which §6 step 7 validates x5c chains is the EARLIEST `gen_time` among the counting anchors that are
@@ -330,7 +334,7 @@ true/false/null), and since 1.5.0 `anchors_verified` (an integer, §3.3).
 Run every `spec/vectors/ap2/<name>.json` under the policy in
 `<name>.expected.json` and reproduce the `normative` block exactly
 (`run_ap2_conformance.py` does this for the reference; exit 0 = conformant).
-The set contains five ACCEPTs (`valid_signed` — positive control — and `anchor_valid`,
+The set contains seven ACCEPTs (`valid_signed` — positive control — and `anchor_valid`,
 a real RFC 3161 token from a probe TSA whose certificate ships beside it; since 1.4.0 also
 `header_param_ignored`, a signed header with an unregistered parameter that RFC 7515 §4 says to
 ignore, `kb_jwt_valid`, a holder-bound mandate whose KB-JWT verifies, and `key_jwk_member_ignored`,
@@ -433,4 +437,7 @@ corpus) 8 186 passed SILENTLY on 1.3.0 in BOTH verifiers — `valid` unchanged, 
 agreement between two implementations by one author is not correctness. On 1.4.0: 12 818/12 818
 met their class, 0 disagreements (details in CHANGELOG 1.4.0). 1.5.0 adds `anchors` (the top-level key and every
 entry): measured 2026-10-11, 16 503 mutations from 37 sources, each met its class in both verifiers, 0 disagreements on
-16 540 files; the same corpus against the 1.4.1 verifiers: 788 (Python) and 689 (JS) mutations without their class.
+16 540 files. Against the 1.4.1 verifiers the same corpus leaves 788 (Python) and 689 (JS) mutations without their
+class, all from the two accepting `anchors` sources: 1.4.1 refuses the `anchors` key (as its §9 requires) and, in Python,
+444 runs of `anchors_two_valid` stop at a `TypeError` (the 1.4.1 API has no `min_anchors`) — a check that the bench reaches
+these sources, not a measure of the §3.3 rules; the mutants of the new code are that measure (CHANGELOG 1.5.0).

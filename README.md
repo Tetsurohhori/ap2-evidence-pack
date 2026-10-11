@@ -96,13 +96,14 @@ may carry `anchors`, a non-empty list OUTSIDE the digest; each entry names its `
   rejects the pack (an anchor is never ignored because another one verifies);
 - a `mechanism` this revision does not define, an unknown key, an empty list: a refusal that names it;
 - `anchors_verified` (a new normative field) counts the DISTINCT anchors that verify — the token in
-  `rfc3161_timestamp` included; a copied token is one anchor; under `--tsa-cert` (a PEM file may hold several TSAs)
+  `rfc3161_timestamp` included; two anchors are the same when the TSTInfo the TSA signed is the same, so a copied token
+  is one anchor however it is re-wrapped; under `--tsa-cert` (a PEM file may hold several TSAs)
   only TSA-verified anchors count; `--min-anchors N` is the relying party's policy (`--require-anchor` alone is 1);
 - distinct tokens of the SAME TSA count as two: they share that TSA's key, so the count does not establish that they
   fail independently — a relying party that needs that reads each entry's TSA and `gen_time` (declared).
 
 `ap2_evidence.py build … --tsa A --tsa B` puts A's token in `rfc3161_timestamp` (so a pack with one TSA is still read by
-1.4.x) and the others in `anchors`; `ap2_evidence.py stamp pack.json --tsa C` adds one to an existing pack — a second TSA,
+1.4.x) and the others in `anchors`; `ap2_evidence.py stamp pack.json --tsa C` (one `--tsa` per run) adds one to an existing pack — a second TSA,
 or a renewal before the first TSA's certificate ages out — after checking that the sealed content still matches its digest;
 the digest and the producer signatures do not change. Only RFC 3161 is defined here; another mechanism (an OpenTimestamps
 proof, a renewal chain in RFC 4998 form) would be a new revision of the SPEC, not something a verifier skips. A pack that
@@ -111,7 +112,7 @@ carries `anchors` needs a 1.5.0 verifier: 1.4.x refuses the unknown top-level ke
 ## Conformance (normative)
 
 The format is defined by `SPEC_AP2_EVIDENCE.md` plus the test vectors in
-`spec/vectors/ap2/` — five ACCEPTs (`valid_signed`, the positive control; `anchor_valid`,
+`spec/vectors/ap2/` — seven ACCEPTs (`valid_signed`, the positive control; `anchor_valid`,
 a real RFC 3161 token from a probe TSA whose certificate ships beside it; and, since 1.4.0,
 `header_param_ignored`, `kb_jwt_valid`, `key_jwk_member_ignored`; since 1.5.0 `anchors_two_valid` and `anchors_only`)
 and nineteen REJECTs
@@ -357,7 +358,7 @@ python3 test_ap2_evidence.py      # negative controls first — the bench can fa
 python3 test_ap2_conformance.py   # conformance vectors + ACVP ML-DSA-65 + signature suite + acceptance profile + CLI grammar + JS agreement
 python3 test_ap2_schema_mutants.py     # closed schema (SPEC §9) under generative mutation, both verifiers, quick subset
 python3 test_ap2_closed_schema_gaps.py # closed schema: the cases the generative bench does not derive (optional keys, present, KB record, report order)
-python3 test_ap2_anchors.py            # 1.5.0: stamp / build --tsa repeated with a real local TSA, --min-anchors grammar in both verifiers
+python3 test_ap2_anchors.py            # 1.5.0: stamp / build --tsa repeated with a real local TSA, anchor identity, the earliest gen_time, --min-anchors in both verifiers
 python3 verifiers/schema_mutants.py --full   # the release measurement (16 503 mutations in 1.5.0); --py-root/--js point it at an older checkout = positive control
 python3 verifiers/differential_oracle.py   # Python vs Node on every vector, hostile file and CLI case (needs node)
 verifiers/lax_python_ablation.sh           # the strict layers removed from a copy of the reference -> the suite must be red

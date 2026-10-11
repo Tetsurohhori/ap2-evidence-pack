@@ -296,6 +296,17 @@ function verifyRfc3161(tsrB64, expectedDigestHex) {
     return { verified: Boolean(granted && imprintOk), granted, imprint_ok: imprintOk, gen_time: genTime };
   } catch (e) { return { verified: false, granted: grantedRead, imprint_ok: null, gen_time: null, note: "token not parseable: " + (e.message ?? e) }; }   // r10: same shape and same measured status as the reference
 }
+// 1.5.0 — SPEC §3.3: the identity of an anchor is the TSTInfo the TSA signed (eContent of the token), not the bytes around
+// it. Called only on a token whose binding verified, so the walk below already succeeded once in verifyRfc3161.
+function tstInfoHex(tsrB64) {
+  const raw = b64Strict(tsrB64);
+  try {
+    const resp = derTLV(raw, 0); const token = derChildren(raw, resp)[1];
+    const ci = derChildren(raw, token); const sd = derChildren(raw, ci[1])[0]; const sdc = derChildren(raw, sd);
+    const wrap = derChildren(raw, derChildren(raw, sdc[2])[1])[0];
+    return "tst:" + raw.subarray(wrap.start, wrap.end).toString("hex");
+  } catch { return "raw:" + raw.toString("hex"); }
+}
 // ---- evidence ----
 // The file is opened WITHOUT blocking and read only if the OPEN descriptor is a regular file, at most MAX_BYTES bytes: a FIFO
 // must not hang the verifier, a symlink to /dev/zero (a device reports size 0) must not be read until memory runs out.
@@ -313,6 +324,8 @@ function readEvidenceBytes(path) {
   } finally { closeSync(fd); }
 }
 export function verifyEvidence(path, opts = {}) {
+  if (opts.minAnchors !== undefined && opts.minAnchors !== null && !(Number.isSafeInteger(opts.minAnchors) && opts.minAnchors >= 1))   // SPEC §3.3: an integer >= 1 —
+    throw new TypeError("minAnchors must be an integer >= 1 (got " + String(opts.minAnchors) + ")");   // NaN once disabled the policy in silence
   const refuse = (m) => ({ digest_ok: false, artifacts: [], producer_signatures: { present: false, pq_protected: false, trusted: null }, pq_protected: false, bindings_ok: false, rfc3161: { claimed: false, verified: null }, anchors: [], anchors_verified: 0, provenance_classes: [], self_asserted_only: true, chain_verified: null, policy_ok: false, valid: false, honest_scope: null, refused: m });   // r8: the honesty flag is fail-closed inside a refusal too
   let ev; try { const raw = readEvidenceBytes(path); if (raw === null) return refuse("evidence file exceeds bound"); const text = UTF8.decode(raw); if (text.startsWith("﻿")) return refuse("BOM"); ev = parseStrict(text); } catch (e) { return refuse(String(e.message ?? e)); }
   if (ev === null || typeof ev !== "object" || Array.isArray(ev)) return refuse("not a JSON object");
@@ -372,11 +385,12 @@ export function verifyEvidence(path, opts = {}) {
   if (ts.anchored && typeof ts.tsr_b64 === "string") rfc = { claimed: true, ...verifyRfc3161(ts.tsr_b64, recomputed), tsa_verified: null };   // BINDING only (status granted + messageImprint == digest, SPEC §3.2); TSA signature/chain: this verifier cannot (no openssl) -> tsa_verified null = incomplete under --tsa-cert
   else if (ts.anchored) rfc = { claimed: true, verified: false, note: "anchored claimed but tsr_b64 absent" };
   // 1.5.0 — SPEC §3.3: each `anchors` entry checked like the block; COUNTING = binding verified (+ TSA-verified when --tsa-cert:
-  // never here, no openssl -> 0 under --tsa-cert, declared); DISTINCT = different token bytes; any failing claim fails the pack
+  // never here, no openssl -> 0 under --tsa-cert, declared); DISTINCT = a different signed TSTInfo (a copied token is one anchor,
+  // however it is wrapped); any failing claim fails the pack
   const anchorResults = (ev.anchors ?? []).map((an) => ({ mechanism: an.mechanism, claimed: true, ...verifyRfc3161(an.tsr_b64, recomputed), tsa_verified: null }));
   const counted = new Set();
   const pairs = (rfc.claimed ? [[rfc, ts.tsr_b64]] : []).concat(anchorResults.map((r, i) => [r, ev.anchors[i].tsr_b64]));
-  for (const [r, tok] of pairs) if (r.verified === true && (!opts.tsaCert || r.tsa_verified === true)) counted.add(b64Strict(tok).toString("hex"));
+  for (const [r, tok] of pairs) if (r.verified === true && (!opts.tsaCert || r.tsa_verified === true)) counted.add(tstInfoHex(tok));
   const anchorsVerified = counted.size;
   if (anchorResults.length) rfc = { ...rfc, claimed: true, verified: (rfc.verified === false || anchorResults.some((x) => x.verified !== true)) ? false : true };
   const classes = [...new Set(artResults.map((r) => r.provenance_class).filter(Boolean))].sort(cmp);   // r5: by code point, as the reference (default sort is by UTF-16 code unit)
