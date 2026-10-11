@@ -156,8 +156,9 @@ Revocation is not checked (declared).
 
 ### 3.3 Additional time anchors: `anchors` (NORMATIVE, 1.5.0)
 
-One RFC 3161 token depends on one TSA key, which ages; mechanisms that fail in different ways (another TSA, a renewal
-token, in a later revision another kind of commitment) can only add protection if the pack can carry more than one. Before
+One RFC 3161 token depends on one TSA key, which ages; mechanisms that fail in different ways (another TSA; in a later
+revision another kind of commitment, such as an RFC 4998 renewal) can only add protection if the pack can carry more
+than one. Before
 1.5.0 it could not: a second token as a new top-level key changes the digest, and inside `rfc3161_timestamp` it is a
 refusal (§9.1). `anchors` is the place for them.
 
@@ -169,7 +170,11 @@ refusal (§9.1). `anchors` is the place for them.
 - Every `rfc3161` entry is checked exactly as §3.2 checks the `rfc3161_timestamp` token, against the RECOMPUTED digest:
   `verified`, `granted`, `imprint_ok`, `gen_time`, `tsa_verified` (`--tsa-cert` takes a PEM file that may hold the
   certificates of several TSAs). A claimed entry whose binding fails rejects the pack, like a failing
-  `rfc3161_timestamp` token: an anchor is never ignored because another one verifies.
+  `rfc3161_timestamp` token: an anchor is never ignored because another one verifies. An entry whose TSA signature does
+  not verify under `--tsa-cert` is not counted (below): it does not reject the pack by itself, only through a policy it
+  then fails to meet.
+- Every `rfc3161` entry commits to the pack's digest, not to the anchors already present: a token added later proves
+  existence from its own time only. It is not a renewal in the sense of RFC 4998 (which re-stamps the earlier evidence).
 - The receipt lists one result per entry in `anchors` (same order), each carrying `mechanism`.
 - **Counting.** An anchor COUNTS when its binding is verified and, when the relying party passed `--tsa-cert`, its TSA
   signature is verified too. `anchors_verified` (normative, an integer) is the number of DISTINCT counting anchors
@@ -287,8 +292,8 @@ flags: `require_producer`, `require_pq`, `require_anchor`, and `min_anchors` (1.
    granted AND messageImprint == the **recomputed** digest → `rfc3161_verified`
    true/false (this needs no tooling: a DER walk). The TSA's signature and chain are
    verified only against a relying-party-supplied TSA certificate (`tsa_verified`
-   true/false; `null` = not requested or no tooling, never a pass). A claimed-but-failing token fails
-   the pack (tamper, not a warning). 1.5.0: the same check for every `anchors` entry, and `anchors_verified` (§3.3).
+   true/false; `null` = not requested or no tooling, never a pass). A claimed token whose binding fails
+   fails the pack (tamper, not a warning); one whose TSA signature does not verify is not counted (§3.3). 1.5.0: the same check for every `anchors` entry, and `anchors_verified` (§3.3).
 5. Verify the producer block per §5 → `producer_ok`, `producer_trusted`,
    `pq_protected`.
 6. Policy: `policy_ok` is false if `require_producer` and no valid producer

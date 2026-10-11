@@ -1036,9 +1036,10 @@ def build_evidence(artifacts: List[Dict], out_path: str,
 
 
 def add_anchor(path: str, tsa_url: str) -> Dict:
-    """1.5.0 — SPEC §3.3: append one RFC 3161 anchor to an EXISTING pack (a second TSA, or a renewal before the first TSA's
-    certificate ages out). The token is requested for the digest RECOMPUTED from the sealed content, and the pack is
-    refused unchanged when that differs from the declared digest (stamping a pack that does not verify would attest
+    """1.5.0 — SPEC §3.3: append one RFC 3161 anchor to an EXISTING pack (a second TSA, or a later token from any TSA).
+    The token commits to the pack's digest, not to the anchors already there, so it proves existence from its own time
+    only: it is not an RFC 4998 renewal. The token is requested for the digest RECOMPUTED from the sealed content, and
+    the pack is refused unchanged when that differs from the declared digest (stamping a pack that does not verify would attest
     nothing). The digest and the producer signatures do not change: `anchors` lies outside them. Written atomically."""
     import tempfile
     path = os.path.realpath(path)   # a symlink is followed: the pack it names is stamped, the link stays a link

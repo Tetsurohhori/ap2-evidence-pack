@@ -2,6 +2,14 @@
 
 ## 1.5.0 — 2026-10-11 — more than one time anchor: `anchors` (SPEC §3.3)
 
+**Text corrected after the release (2026-10-11, no code change).** The README and the `add_anchor` docstring said `stamp` adds "a
+renewal before the first TSA's certificate ages out", and the SPEC §3.3 introduction listed "a renewal token" among the
+mechanisms a pack can carry. Neither holds: each token commits to the pack's digest, not to the anchors already there, so
+a token added later proves existence from its own time only — not a renewal in the sense of RFC 4998. And "a failing one
+fails the pack" (this entry) and "a claimed anchor that fails rejects the pack" (README) were true for a token whose
+binding fails, not for one whose TSA signature does not verify under `--tsa-cert`: that one is not counted, which can
+fail the pack only through a `--min-anchors` / `require_anchor` policy. Behaviour, vectors and digests are unchanged.
+
 **Why.** One RFC 3161 token depends on one TSA key, which ages. Measured on 1.3.0 and stated in the AP2 #338 discussion:
 the format could not carry a second commitment to the same digest — a new top-level key changes the digest, and inside
 `rfc3161_timestamp` it was silently ignored (1.3.0) or refused (1.4.x).
@@ -9,8 +17,9 @@ the format could not carry a second commitment to the same digest — a new top-
 **The rule, written first (SPEC §3.3, §9.1, revision 1.5.0).** `anchors` is an optional, non-empty top-level list OUTSIDE the
 digest (§3 now excludes four keys; no 1.0–1.4 pack carries it, so no earlier digest changes). Each entry is a closed object
 naming its `mechanism`; this revision defines `rfc3161` (`tsr_b64`, `tsa_url`, `note`). An undefined mechanism, an unknown
-key or an empty list is a refusal that names it. Every entry is checked like the `rfc3161_timestamp` token; a failing one
-fails the pack. `anchors_verified` — the number of DISTINCT anchors (a different signed TSTInfo) that verify (and, under
+key or an empty list is a refusal that names it. Every entry is checked like the `rfc3161_timestamp` token; one whose
+binding fails fails the pack (one whose TSA signature does not verify under `--tsa-cert` is not counted, as for the
+block). `anchors_verified` — the number of DISTINCT anchors (a different signed TSTInfo) that verify (and, under
 `--tsa-cert`, are TSA-verified), the block's token included — is a twelfth normative field; `min_anchors` / `--min-anchors N` is the
 relying party's policy (`require_anchor` alone is 1). `rfc3161_claimed`/`rfc3161_verified` aggregate over the block and the
 entries; on a pack without `anchors` both are what 1.4.x reports. The x5c chain is validated at the EARLIEST `gen_time`

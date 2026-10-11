@@ -92,8 +92,10 @@ key changed the digest, and inside `rfc3161_timestamp` it was refused (1.4.0) or
 may carry `anchors`, a non-empty list OUTSIDE the digest; each entry names its `mechanism` (this revision defines
 `rfc3161`: `tsr_b64`, optional `tsa_url`, `note`) and is a closed object. What the verifiers do with it:
 
-- every entry is checked like the `rfc3161_timestamp` token against the recomputed digest; a claimed anchor that fails
-  rejects the pack (an anchor is never ignored because another one verifies);
+- every entry is checked like the `rfc3161_timestamp` token against the recomputed digest; a claimed anchor whose BINDING
+  fails rejects the pack (an anchor is never ignored because another one verifies); under `--tsa-cert`, an anchor whose
+  TSA signature does not verify is not counted (the same rule as the `rfc3161_timestamp` token): it does not reject the
+  pack by itself, only through a `--min-anchors` / `--require-anchor` policy it then fails to meet;
 - a `mechanism` this revision does not define, an unknown key, an empty list: a refusal that names it;
 - `anchors_verified` (a new normative field) counts the DISTINCT anchors that verify — the token in
   `rfc3161_timestamp` included; two anchors are the same when the TSTInfo the TSA signed is the same, so a copied token
@@ -103,11 +105,13 @@ may carry `anchors`, a non-empty list OUTSIDE the digest; each entry names its `
   fail independently — a relying party that needs that reads each entry's TSA and `gen_time` (declared).
 
 `ap2_evidence.py build … --tsa A --tsa B` puts A's token in `rfc3161_timestamp` (so a pack with one TSA is still read by
-1.4.x) and the others in `anchors`; `ap2_evidence.py stamp pack.json --tsa C` (one `--tsa` per run) adds one to an existing pack — a second TSA,
-or a renewal before the first TSA's certificate ages out — after checking that the sealed content still matches its digest;
+1.4.x) and the others in `anchors`; `ap2_evidence.py stamp pack.json --tsa C` (one `--tsa` per run) adds one to an existing pack — from a second TSA,
+or a later token from any TSA — after checking that the sealed content still matches its digest;
 the digest and the producer signatures do not change. Only RFC 3161 is defined here; another mechanism (an OpenTimestamps
 proof, a renewal chain in RFC 4998 form) would be a new revision of the SPEC, not something a verifier skips. A pack that
-carries `anchors` needs a 1.5.0 verifier: 1.4.x refuses the unknown top-level key, as its own SPEC §9 requires.
+carries `anchors` needs a 1.5.0 verifier: 1.4.x refuses the unknown top-level key, as its own SPEC §9 requires. Each
+token commits to the pack's digest, not to the anchors already there, so a token added later proves existence from its
+own time only: it is not an RFC 4998 renewal (corrected after the 1.5.0 release, see CHANGELOG).
 
 ## Conformance (normative)
 
