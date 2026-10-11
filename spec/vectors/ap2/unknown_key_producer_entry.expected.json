@@ -1,6 +1,7 @@
 {
  "description": "The valid pack with a key nobody defined inside the ML-DSA-65 producer-signature entry (the signature itself still verifies). SPEC §9.1: the entry is a closed object, so it is a FAIL entry — the block is not ok, pq_protected is false, the pack is not valid. On 1.3.0 the entry was PASS.",
  "normative": {
+  "anchors_verified": 0,
   "bindings_ok": true,
   "digest_ok": true,
   "policy_ok": true,

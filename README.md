@@ -44,10 +44,12 @@ pip install ap2-evidence-pack   # cryptography >= 48 comes with it (declared sin
 
 python3 examples/make_samples.py     # generates sample checkout.sdjwt + payment.sdjwt
 python3 ap2_evidence.py build evidence.json checkout=checkout.sdjwt payment=payment.sdjwt \
-        [--key name=jwk.json] [--jwks-url name=https://...] [--tsa http://tsa.example]
+        [--key name=jwk.json] [--jwks-url name=https://...] [--tsa http://tsa.example]...   # 1.5.0: --tsa may repeat
+python3 ap2_evidence.py stamp evidence.json --tsa http://tsa2.example   # 1.5.0: add one more time anchor to an existing pack
 
 python3 ap2_evidence.py verify evidence.json     # offline, fail-closed; exit 0/1
 python3 ap2_evidence.py verify evidence.json --trusted-producer-key ed25519=<b64> --trusted-producer-key ml-dsa-65=<b64> --require-pq --require-anchor   # relying-party policy (1.1.0)
+python3 ap2_evidence.py verify evidence.json --min-anchors 2 --tsa-cert tsa-bundle.pem   # 1.5.0: two distinct anchors, each TSA-verified
 node verifiers/js/ap2-verify.mjs evidence.json   # the independent verifier, same flags
 ```
 
@@ -78,22 +80,47 @@ classical signature (ed25519 or ecdsa-p256) plus **FIPS 204 ML-DSA-65** — so t
 integrity/authenticity survives the quantum transition (NIST IR 8547). Verification is
 fail-closed; authenticity requires the relying party to **pin** the producer public keys
 out of band (an embedded key proves consistency, never authenticity). Policy flags on
-`verify_evidence`: `require_producer`, `require_pq`, `require_anchor`. The ML-DSA-65
+`verify_evidence`: `require_producer`, `require_pq`, `require_anchor`, and since 1.5.0 `min_anchors`. The ML-DSA-65
 path is checked against a NIST ACVP sigVer subset (`pqcrypto/vectors/`) — the same nine
 cases the elara-mesh verifier runs, so both stacks answer to one set of NIST-published ACVP vectors — a local check
 against public test data, not a NIST validation.
+
+## More than one time anchor: `anchors` (1.5.0, SPEC §3.3)
+
+One RFC 3161 token depends on one TSA key, which ages. Until 1.4.x a pack could not carry a second one: a new top-level
+key changed the digest, and inside `rfc3161_timestamp` it was refused (1.4.0) or, before that, ignored. Since 1.5.0 a pack
+may carry `anchors`, a non-empty list OUTSIDE the digest; each entry names its `mechanism` (this revision defines
+`rfc3161`: `tsr_b64`, optional `tsa_url`, `note`) and is a closed object. What the verifiers do with it:
+
+- every entry is checked like the `rfc3161_timestamp` token against the recomputed digest; a claimed anchor that fails
+  rejects the pack (an anchor is never ignored because another one verifies);
+- a `mechanism` this revision does not define, an unknown key, an empty list: a refusal that names it;
+- `anchors_verified` (a new normative field) counts the DISTINCT anchors that verify — the token in
+  `rfc3161_timestamp` included; a copied token is one anchor; under `--tsa-cert` (a PEM file may hold several TSAs)
+  only TSA-verified anchors count; `--min-anchors N` is the relying party's policy (`--require-anchor` alone is 1);
+- distinct tokens of the SAME TSA count as two: they share that TSA's key, so the count does not establish that they
+  fail independently — a relying party that needs that reads each entry's TSA and `gen_time` (declared).
+
+`ap2_evidence.py build … --tsa A --tsa B` puts A's token in `rfc3161_timestamp` (so a pack with one TSA is still read by
+1.4.x) and the others in `anchors`; `ap2_evidence.py stamp pack.json --tsa C` adds one to an existing pack — a second TSA,
+or a renewal before the first TSA's certificate ages out — after checking that the sealed content still matches its digest;
+the digest and the producer signatures do not change. Only RFC 3161 is defined here; another mechanism (an OpenTimestamps
+proof, a renewal chain in RFC 4998 form) would be a new revision of the SPEC, not something a verifier skips. A pack that
+carries `anchors` needs a 1.5.0 verifier: 1.4.x refuses the unknown top-level key, as its own SPEC §9 requires.
 
 ## Conformance (normative)
 
 The format is defined by `SPEC_AP2_EVIDENCE.md` plus the test vectors in
 `spec/vectors/ap2/` — five ACCEPTs (`valid_signed`, the positive control; `anchor_valid`,
 a real RFC 3161 token from a probe TSA whose certificate ships beside it; and, since 1.4.0,
-`header_param_ignored`, `kb_jwt_valid`, `key_jwk_member_ignored`) and twelve REJECTs
+`header_param_ignored`, `kb_jwt_valid`, `key_jwk_member_ignored`; since 1.5.0 `anchors_two_valid` and `anchors_only`)
+and nineteen REJECTs
 (stripped-signature downgrade, valid-but-unpinned producer key, digest mismatch, time
 anchor required-but-missing, time anchor claimed-but-invalid, a real token issued for
 another digest; since 1.4.0 an unknown key at the top level / inside the anchor block / inside
 an artifact entry / inside a producer-signature entry, a `crit` nobody understands, and a
-KB-JWT without `typ: kb+jwt`). An independent verifier
+KB-JWT without `typ: kb+jwt`; since 1.5.0 seven `anchors` cases of SPEC §3.3, the three refusals pinned to their exact
+text). An independent verifier
 claims conformance by reproducing each vector's `normative` block under its declared
 policy, from the spec text alone:
 
@@ -103,8 +130,8 @@ python3 spec/vectors/ap2/run_ap2_conformance.py   # exit 0 = conformant
 
 | Implementation | Runtime / deps | Status |
 |---|---|---|
-| `ap2_evidence.py` | Python 3 + `cryptography` | reference — conformant 17/17; ACVP ML-DSA-65 sigVer 9/9 |
-| `verifiers/js/ap2-verify.mjs` | Node with OpenSSL ≥ 3.5 for ML-DSA-65 (measured: Node 22.23.2 / OpenSSL 3.5.7 locally, Node 24 in CI), `node:crypto` only; on an older build ML-DSA-65 is SKIP = incomplete, never a pass, and the ML-DSA vectors are not measured (the JS conformance test skips, it does not pass); no TSA signature check — `tsa_verified` null | independent — conformant 17/17 on every normative field (and the `report` block) through `run_ap2_conformance.run(verify_fn=…)` (`test_ap2_conformance.py`) |
+| `ap2_evidence.py` | Python 3 + `cryptography` | reference — conformant 26/26; ACVP ML-DSA-65 sigVer 9/9 |
+| `verifiers/js/ap2-verify.mjs` | Node with OpenSSL ≥ 3.5 for ML-DSA-65 (measured: Node 22.23.2 / OpenSSL 3.5.7 locally, Node 24 in CI), `node:crypto` only; on an older build ML-DSA-65 is SKIP = incomplete, never a pass, and the ML-DSA vectors are not measured (the JS conformance test skips, it does not pass); no TSA signature check — `tsa_verified` null | independent — conformant 26/26 on every normative field (and the `report` block) through `run_ap2_conformance.run(verify_fn=…)` (`test_ap2_conformance.py`) |
 
 **Closed schema (1.4.0, SPEC §9; 1.4.1).** Measured on 1.3.0 on 2026-10-10: a key nobody had defined, written inside
 `rfc3161_timestamp`, `producer_signatures` or a `signatures[i]` entry, was `valid: true` in both verifiers with nothing in
@@ -116,15 +143,19 @@ vector and from freshly signed packs 12 818 mutations at every level of every ob
 every value type, every known key of every hostile type and deleted, duplicate keys, key order, escaped spellings, `crit`,
 KB-JWT claims, out-of-grammar files), computes each one's expected class from the SPEC tables and holds both verifiers to
 it and to each other: 12 818/12 818, 0 disagreements on 1.4.0; on the 1.3.0 verifiers the same corpus passed SILENTLY
-8 186 times in both, with the two agreeing on every one (CHANGELOG 1.4.0). The quick subset (3 085) runs in CI.
+8 186 times in both, with the two agreeing on every one (CHANGELOG 1.4.0). 1.5.0 adds `anchors` to the tables: 16 503
+mutations from 37 sources, each with its class in both verifiers, 0 disagreements on 16 540 files (measured 2026-10-11).
+The quick subset (3 976) runs in CI.
 
 **Differential oracle** (`verifiers/differential_oracle.py`, 22/09/2026): the two verifiers must
 give the same `(valid, digest_ok, bindings_ok, producer_ok, pq_protected, rfc3161_verified,
 policy_ok, producer_present, producer_trusted, rfc3161_claimed/granted/imprint_ok/gen_time, chain_verified,
 self_asserted_only, provenance_classes, and the `x5c_leaf` identity of every artifact)`
-— the eleven normative fields of SPEC §6 plus `rfc3161.granted`, `rfc3161.imprint_ok`, `rfc3161.gen_time`,
-`chain_verified`, `provenance_classes` and the `x5c_leaf` identity — on the 17 vectors under their declared policy (plus `anchor_valid` under
-`--require-anchor --tsa-cert`, and the CA-issued `x5c` leaf under `--trust-anchor`), 117 hostile files that carry the digest a lenient verifier would
+— the normative fields of SPEC §6 (twelve since 1.5.0: `anchors_verified`) plus `rfc3161.granted`, `rfc3161.imprint_ok`, `rfc3161.gen_time`,
+`chain_verified`, `provenance_classes`, the `x5c_leaf` identity and, since 1.5.0, each `anchors` entry and the refusal
+text where SPEC §9.1/§3.3 fix it — on the 26 vectors under their declared policy (plus `anchor_valid` under
+`--require-anchor --tsa-cert`, `anchors_two_valid` under `--min-anchors 2` with a bundle of both probe TSAs and with
+the first TSA alone, and the CA-issued `x5c` leaf under `--trust-anchor`), 117 hostile files that carry the digest a lenient verifier would
 recompute or a wrong JSON shape (`__proto__` key with the digest recomputed over it, non-UTF-8, float `1.0`, 2^53+1, 100000-deep,
 `NaN`, lone surrogate, duplicate key, BOM, non-object, `artifacts`/`key`/`jwk`/`rfc3161_timestamp`/
 `producer_signatures` of the wrong type, an empty producer block, base64url with a space /
@@ -163,6 +194,9 @@ REJECT to everything is caught; through 1.2.0 this sentence said more than the o
 controls, and two verifiers refusing one alike were an agreement — measured by ablation on 25/09/2026, see CHANGELOG). The CA-issued `x5c` leaf under `--trust-anchor`, the only case
 where `self_asserted_only` is false, is one of the hostile files, not one of those three — this sentence said
 otherwise through 1.1.2:
+Re-measured 2026-10-11 on 1.5.0: **169 cases, 0 disagreements, of which 6 are declared divergences**
+(`29 vector runs + 117 hostile files + 4 positive controls + 19 CLI cases = 169`; the two new declared ones are the same
+cause — `anchors_two_valid` under `--tsa-cert`, which only the reference can check). On 1.4.0:
 **158 cases, 0 disagreements, of which 4 are declared divergences** (measured 2026-10-10 on 1.4.0; the run prints its own
 decomposition — `18 vector runs + 117 hostile files + 4 positive controls + 19 CLI cases = 158` — so these numbers are
 copied from that line rather than counted by hand, which is how several of them went stale during the
@@ -234,7 +268,10 @@ it prints the SDK commit and the `sd-jwt` version it actually loaded rather than
 AP2_SDK_PATH=/path/to/AP2/code/sdk/python python3 verifiers/sdk_crosscheck.py --hostile
 ```
 
-Re-measured 2026-10-11 on 1.4.0 (AP2 SDK `e1ea56db72a6`, `sd-jwt` 0.10.4). On the seventeen vectors alone: **26
+Re-measured 2026-10-11 on 1.5.0, vectors plus the hostile corpus: 144 packs seen, 41 refused before the mandate layer,
+**154 artifacts compared, 102 claim-sets compared, 0 disagreements** on a rule the RFC puts on the verifier, none in the
+direction "we accept, a third implementation refuses" (AP2 SDK `e1ea56db72a6`, `sd-jwt` 0.10.4). Earlier the same day on 1.4.0
+(same SDK, `sd-jwt` 0.10.4), on the seventeen vectors alone: **26
 artifacts compared, 23 claim-sets compared, 0 disagreements** (two packs are refused before the mandate layer and one
 artifact at a closed object of SPEC §9.1, which the third stack never sees). Vectors plus the hostile corpus together:
 **142 artifacts compared (26 from the vectors, 116 hostile), 90 claim-sets compared, 0 undeclared disagreements**. The three file-object cases of the oracle (a FIFO, a symlink to
@@ -320,7 +357,8 @@ python3 test_ap2_evidence.py      # negative controls first — the bench can fa
 python3 test_ap2_conformance.py   # conformance vectors + ACVP ML-DSA-65 + signature suite + acceptance profile + CLI grammar + JS agreement
 python3 test_ap2_schema_mutants.py     # closed schema (SPEC §9) under generative mutation, both verifiers, quick subset
 python3 test_ap2_closed_schema_gaps.py # closed schema: the cases the generative bench does not derive (optional keys, present, KB record, report order)
-python3 verifiers/schema_mutants.py --full   # the release measurement (12 818 mutations); --py-root/--js point it at an older checkout = positive control
+python3 test_ap2_anchors.py            # 1.5.0: stamp / build --tsa repeated with a real local TSA, --min-anchors grammar in both verifiers
+python3 verifiers/schema_mutants.py --full   # the release measurement (16 503 mutations in 1.5.0); --py-root/--js point it at an older checkout = positive control
 python3 verifiers/differential_oracle.py   # Python vs Node on every vector, hostile file and CLI case (needs node)
 verifiers/lax_python_ablation.sh           # the strict layers removed from a copy of the reference -> the suite must be red
 AP2_SDK_PATH=... python3 verifiers/sdk_crosscheck.py --hostile   # a third stack, written by other people, on the same tokens
@@ -354,7 +392,7 @@ any legal or regulatory proceeding.
 ## Versioning
 
 Within 1.x these do not change: `build_evidence(artifacts, out_path)`, `verify_evidence(path)` → dict with `valid` and,
-when false, `refused`; the CLI `ap2-evidence build|verify` and its exit codes (0 valid, 1 otherwise). Wheel layout,
+when false, `refused`; the CLI `ap2-evidence build|verify` (1.5.0 adds `stamp`) and its exit codes (0 valid, 1 otherwise). Wheel layout,
 dependency floors and new refusals may change in a minor release and the changelog says so. A change to the three above
 is 2.0.
 

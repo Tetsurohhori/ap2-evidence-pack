@@ -1,6 +1,7 @@
 {
  "description": "Hybrid-signed pack (ed25519 + ML-DSA-65), producer keys pinned, PQ and producer required. The one ACCEPT of the set — a verifier that rejects everything fails here.",
  "normative": {
+  "anchors_verified": 0,
   "bindings_ok": true,
   "digest_ok": true,
   "policy_ok": true,

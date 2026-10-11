@@ -1,6 +1,7 @@
 {
  "description": "The valid pack SEALED with an unregistered member inside a snapshotted JWK. A JWK is RFC 7517's object, and §4 says members not understood MUST be ignored — so the pack is valid and the member is REPORTED in artifacts[0].ignored.key_jwk (SPEC §9.2).",
  "normative": {
+  "anchors_verified": 0,
   "bindings_ok": true,
   "digest_ok": true,
   "policy_ok": true,

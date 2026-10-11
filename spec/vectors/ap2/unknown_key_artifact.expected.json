@@ -1,6 +1,7 @@
 {
  "description": "The valid pack SEALED with a key nobody defined inside an artifact entry — a claim a relying party could read as evidence. SPEC §9.1: the entry is closed, so it is that artifact's error and the pack is not valid.",
  "normative": {
+  "anchors_verified": 0,
   "bindings_ok": false,
   "digest_ok": true,
   "policy_ok": true,

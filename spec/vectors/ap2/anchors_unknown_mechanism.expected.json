@@ -1,0 +1,22 @@
+{
+ "description": "anchor_valid plus an entry whose mechanism this revision does not define: a refusal naming it — never skipped, so the pack cannot look as if it carried an anchor nobody checked (SPEC §3.3).",
+ "normative": {
+  "anchors_verified": 0,
+  "bindings_ok": false,
+  "digest_ok": false,
+  "policy_ok": false,
+  "pq_protected": false,
+  "producer_ok": null,
+  "producer_present": false,
+  "producer_trusted": null,
+  "rfc3161_claimed": false,
+  "rfc3161_verified": null,
+  "self_asserted_only": true,
+  "valid": false
+ },
+ "policy": {},
+ "report": {
+  "refused": "anchors[0]: mechanism \"bitcoin-ots\" is not defined by this revision (SPEC §3.3)"
+ },
+ "vector": "anchors_unknown_mechanism"
+}

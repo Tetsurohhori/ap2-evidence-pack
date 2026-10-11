@@ -16,6 +16,7 @@ function opts(flags) {
     else if (f === "--require-producer") o.requireProducer = true;
     else if (f === "--require-pq") o.requirePq = true;
     else if (f === "--require-anchor") o.requireAnchor = true;
+    else if (f === "--min-anchors") o.minAnchors = Number(flags[++i]);   // 1.5.0 — SPEC §3.3
     else if (f === "--tsa-cert") o.tsaCert = flags[++i];
     else if (f === "--trust-anchor") flags[++i];
     else throw new Error("unknown flag " + f);

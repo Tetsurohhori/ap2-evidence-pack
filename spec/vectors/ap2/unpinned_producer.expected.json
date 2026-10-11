@@ -1,6 +1,7 @@
 {
  "description": "Pack signed by a DIFFERENT (cryptographically valid) identity, verified against the pinned trust set with NO require flags: an embedded key proves consistency, never authenticity — the unpinned signature must reject on its own.",
  "normative": {
+  "anchors_verified": 0,
   "bindings_ok": true,
   "digest_ok": true,
   "policy_ok": true,

@@ -1,11 +1,13 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- Copyright 2026 Roberto Locatelli -->
 
-# ap2-evidence-pack — normative format v1.0 (2026-09-05), specification revision 1.4.1 (2026-10-11)
+# ap2-evidence-pack — normative format v1.0 (2026-09-05), specification revision 1.5.0 (2026-10-11)
 
 Status: **proposed format** (no standards body; normative for this repository), defined by the conformance vectors in
 `spec/vectors/ap2/` (each `<name>.json` pack + `<name>.expected.json`
-policy/verdict). Revision 1.4.0 adds §9, the CLOSED SCHEMA: every object this format defines
+policy/verdict). Revision 1.5.0 adds §3.3: `anchors`, a closed list of additional time anchors outside the
+digest, so one pack can carry more than one commitment to the same digest (a pack with `anchors` needs a 1.5.0 verifier:
+1.4.x refuses the unknown top-level key, as §9 requires). Revision 1.4.0 adds §9, the CLOSED SCHEMA: every object this format defines
 has an exhaustive key list, and a key outside it is a refusal with a reason — never silently
 accepted; objects defined by a standard (JOSE header, JWT claims, JWK, `cnf`) follow that
 standard's rule for the unknown (ignore) and the ignored names are REPORTED in the receipt.
@@ -53,6 +55,7 @@ anchor is caught only under `require_anchor`.
 | `evidence_digest_sha256` | MUST | hex SHA-256 over the canonical content (§3) |
 | `rfc3161_timestamp` | MUST at build (a verifier treats an absent block as `anchored: false`) | `{"anchored": false, "note"?: string}` or `{"anchored": true, "tsr_b64": <b64 DER TimeStampResp>, "tsa_url"?: string, "note"?: string}` — closed (§9.1); `tsa` is accepted as the 1.0–1.3 spelling of `tsa_url` |
 | `producer_signatures` | MAY | hybrid producer-signature block (§5), closed (§9.1) |
+| `anchors` | MAY (1.5.0) | non-empty list of additional time anchors (§3.3), closed (§9.1) |
 
 ## 2. Artifact entry
 
@@ -89,14 +92,15 @@ anywhere in the pack — the one field the honest scope sends the auditor to.
 
 `evidence_digest_sha256 = HEX(SHA-256(canonical_bytes))` where `canonical_bytes`
 is the JSON serialisation of the top-level object **excluding** the keys
-`evidence_digest_sha256`, `rfc3161_timestamp`, `producer_signatures`, with:
+`evidence_digest_sha256`, `rfc3161_timestamp`, `producer_signatures`, `anchors` (1.5.0; no 1.0–1.4 pack carries it, so
+no digest of an earlier pack changes), with:
 
 - keys sorted lexicographically, recursively;
 - separators `(",", ":")` — no insignificant whitespace;
 - ASCII-escaped output (`ensure_ascii`): every non-ASCII character as `\uXXXX`.
 
 (The file's own indentation/escaping on disk is NOT significant — the digest
-is over the canonical form, not the file bytes.) The RFC 3161 token and the
+is over the canonical form, not the file bytes.) The time anchors and the
 producer signatures are outside the digest so they can be attached after
 sealing without changing what they attest.
 
@@ -148,6 +152,38 @@ when the token carries a well-formed `genTime`, so a TSA certificate that expire
 issuing the token does not turn `tsa_verified` false years later; with no usable `genTime`
 the chain is validated at the current time instead (an expired certificate then fails).
 Revocation is not checked (declared).
+
+### 3.3 Additional time anchors: `anchors` (NORMATIVE, 1.5.0)
+
+One RFC 3161 token depends on one TSA key, which ages; mechanisms that fail in different ways (another TSA, a renewal
+token, in a later revision another kind of commitment) can only add protection if the pack can carry more than one. Before
+1.5.0 it could not: a second token as a new top-level key changes the digest, and inside `rfc3161_timestamp` it is a
+refusal (§9.1). `anchors` is the place for them.
+
+- `anchors` is OPTIONAL; when present it is a non-empty list (an empty list, or a non-list, is a refusal).
+- Each entry is a closed object (§9.1) with `mechanism` (string, MUST). This revision defines one mechanism:
+  `"rfc3161"`, with `tsr_b64` (string, MUST: strict base64 of a DER TimeStampResp), `tsa_url` (string) and `note`
+  (string). A `mechanism` this revision does not define is a refusal naming it — never skipped: a verifier that cannot
+  check an anchor must not let the pack look as if it had one. A new mechanism is a new revision of this text.
+- Every `rfc3161` entry is checked exactly as §3.2 checks the `rfc3161_timestamp` token, against the RECOMPUTED digest:
+  `verified`, `granted`, `imprint_ok`, `gen_time`, `tsa_verified` (`--tsa-cert` takes a PEM file that may hold the
+  certificates of several TSAs). A claimed entry whose binding fails rejects the pack, like a failing
+  `rfc3161_timestamp` token: an anchor is never ignored because another one verifies.
+- The receipt lists one result per entry in `anchors` (same order), each carrying `mechanism`.
+- **Counting.** An anchor COUNTS when its binding is verified and, when the relying party passed `--tsa-cert`, its TSA
+  signature is verified too. `anchors_verified` (normative, an integer) is the number of DISTINCT counting anchors
+  among the `rfc3161_timestamp` token and the `anchors` entries; two entries are the same anchor when their decoded token
+  bytes are equal (a copied token is one anchor, not two). Distinct tokens from the same TSA share that TSA's key: this
+  count does not establish that they fail independently — a relying party that needs that reads `gen_time` and the TSA
+  of each entry (declared).
+- `rfc3161_claimed` is true when the `rfc3161_timestamp` block is anchored OR `anchors` holds an `rfc3161` entry;
+  `rfc3161_verified` is `null` when nothing is claimed, `false` when ANY claimed RFC 3161 token fails its binding, and
+  `true` otherwise. On a pack without `anchors` both fields are what 1.4.x reports.
+- **Policy.** `min_anchors` (a verifier input, integer ≥ 1): `policy_ok` is false when `anchors_verified` < `min_anchors`.
+  `require_anchor` is `min_anchors = 1` when no larger value is given. How many anchors a relying party requires is its
+  decision; the pack never states it.
+- The time at which §6 step 7 validates x5c chains is the EARLIEST `gen_time` among the counting anchors that are
+  TSA-verified (the strongest existence bound the pack proves); with none, the current time, as before.
 
 ## 4. Bindings (NORMATIVE)
 
@@ -210,8 +246,8 @@ only on a valid ML-DSA-65 signature whose key is pinned (or no pin set given).
 
 ## 6. Verification algorithm and verdict (NORMATIVE)
 
-Inputs: the pack file, an optional pinned producer trust set, and three policy
-flags: `require_producer`, `require_pq`, `require_anchor`.
+Inputs: the pack file, an optional pinned producer trust set, three policy
+flags: `require_producer`, `require_pq`, `require_anchor`, and `min_anchors` (1.5.0, §3.3).
 
 1. Parse under the profile (§3.1; duplicate keys reject). Refuse unless `evidence_format` is
    exactly `"ap2-evidence-pack/1.0"`, unless `honest_scope` matches the canonical scope of that version
@@ -248,13 +284,13 @@ flags: `require_producer`, `require_pq`, `require_anchor`.
    true/false (this needs no tooling: a DER walk). The TSA's signature and chain are
    verified only against a relying-party-supplied TSA certificate (`tsa_verified`
    true/false; `null` = not requested or no tooling, never a pass). A claimed-but-failing token fails
-   the pack (tamper, not a warning).
+   the pack (tamper, not a warning). 1.5.0: the same check for every `anchors` entry, and `anchors_verified` (§3.3).
 5. Verify the producer block per §5 → `producer_ok`, `producer_trusted`,
    `pq_protected`.
 6. Policy: `policy_ok` is false if `require_producer` and no valid producer
    block; if `require_pq` and not (`pq_protected` and `producer_trusted` true);
-   if `require_anchor` and `rfc3161_verified` is not true (missing, unverifiable
-   and failing all reject — "claimed" never upgrades to "proven").
+   if `anchors_verified` < `min_anchors` (§3.3; `require_anchor` alone is `min_anchors = 1`, so missing,
+   unverifiable and failing anchors all reject — "claimed" never upgrades to "proven").
    The receipt also carries `mldsa_backend` (informative): whether that verifier can check
    ML-DSA-65 at all. Without the backend a post-quantum producer signature is SKIP — never a pass —
    and the reader should not have to infer why.
@@ -283,11 +319,11 @@ flags: `require_producer`, `require_pq`, `require_anchor`.
    AND `bindings_ok` AND `rfc3161_verified` is not false AND producer block ok
    (when present) and trusted (when pinned) AND `policy_ok`.
 
-The eleven **normative verdict fields** a conformant verifier must reproduce:
+The twelve **normative verdict fields** a conformant verifier must reproduce:
 `valid`, `digest_ok`, `bindings_ok`, `policy_ok`, `pq_protected`,
 `producer_present`, `producer_ok`, `producer_trusted`, `rfc3161_claimed`,
 `rfc3161_verified`, `self_asserted_only` (tri-state fields use
-true/false/null).
+true/false/null), and since 1.5.0 `anchors_verified` (an integer, §3.3).
 
 ## 7. Conformance (normative)
 
@@ -298,16 +334,20 @@ The set contains five ACCEPTs (`valid_signed` — positive control — and `anch
 a real RFC 3161 token from a probe TSA whose certificate ships beside it; since 1.4.0 also
 `header_param_ignored`, a signed header with an unregistered parameter that RFC 7515 §4 says to
 ignore, `kb_jwt_valid`, a holder-bound mandate whose KB-JWT verifies, and `key_jwk_member_ignored`,
-a snapshotted JWK with an unregistered member) and twelve
+a snapshotted JWK with an unregistered member; since 1.5.0 `anchors_two_valid`, two distinct anchors
+under `min_anchors` 2, and `anchors_only`, an anchor carried only in `anchors`) and nineteen
 REJECTs (stripped-signature downgrade, valid-but-unpinned producer, digest mismatch,
 anchor required-but-missing, anchor claimed-but-invalid, a real token for another digest; since
 1.4.0: an unknown key at the top level, inside `rfc3161_timestamp`, inside an artifact entry and
 inside a producer-signature entry, a `crit` header parameter the verifier does not understand, and
-a KB-JWT without the `kb+jwt` type). A vector
+a KB-JWT without the `kb+jwt` type; since 1.5.0 (§3.3): a copied token counted once, one anchor under
+`min_anchors` 2, an `anchors` entry whose token is not a TimeStampResp, a real token for another
+digest in `anchors`, an unknown mechanism, an unknown key in an entry, an empty `anchors`). A vector
 whose `requires` tooling is absent is reported SKIP, honestly unverified. When an
 `<name>.expected.json` carries a `report` block, a conformant verifier also reproduces it: today it
 holds `ignored`, the per-artifact list of names ignored under a standard's rule (§9.2), mapped
-onto the reference receipt's `artifacts[i].ignored`.
+onto the reference receipt's `artifacts[i].ignored`; since 1.5.0 it may also hold `refused`, the EXACT
+refusal text (§9.1/§3.3 fix its form), so a verifier that refuses for another reason does not pass.
 Independent implementations: open a PR to be listed in the README conformance table.
 
 
@@ -347,7 +387,8 @@ after JSON unescaping — `"subj\u0065ct"` IS `subject`).
 
 | Object | Keys (type) | Unknown / wrong type / missing MUST |
 |---|---|---|
-| top level | `evidence_format` (string, MUST), `subject` (string, MUST), `created_utc` (string, MUST), `artifacts` (list, MUST), `bindings` (list; absent reads as `[]`), `honest_scope` (string, MUST), `evidence_digest_sha256` (string, MUST), `rfc3161_timestamp` (object), `producer_signatures` (object) | refusal |
+| top level | `evidence_format` (string, MUST), `subject` (string, MUST), `created_utc` (string, MUST), `artifacts` (list, MUST), `bindings` (list; absent reads as `[]`), `honest_scope` (string, MUST), `evidence_digest_sha256` (string, MUST), `rfc3161_timestamp` (object), `producer_signatures` (object), `anchors` (non-empty list, 1.5.0) | refusal |
+| `anchors[i]` (1.5.0) | `mechanism` (string, MUST, one of the mechanisms of §3.3: `"rfc3161"`); for `rfc3161`: `tsr_b64` (string, MUST), `tsa_url` (string), `note` (string); an entry that is not an object | refusal (an unknown `mechanism` is named: `anchors[i]: mechanism "x" is not defined by this revision (SPEC §3.3)`) |
 | `rfc3161_timestamp` | `anchored` (boolean, MUST), `tsr_b64` (string; when `anchored` is true and it is ABSENT the §6.4 rule applies: `rfc3161_verified: false`, not a refusal), `tsa_url` (string), `tsa` (string, 1.0–1.3 spelling), `note` (string) | refusal |
 | `producer_signatures` | `scheme` (`"hybrid"` or `"classical-only"`, MUST), `over` (`"evidence_digest_sha256"`, MUST), `signatures` (list, MUST) | refusal |
 | `producer_signatures.signatures[i]` | `sig_alg` (string, MUST), `public_key_b64` (string, MUST), `signature_b64` (string, MUST), `post_quantum` (boolean, MUST, `true` iff `sig_alg == "ml-dsa-65"`); an entry that is not an object | FAIL entry |
@@ -390,4 +431,6 @@ verifiers the same corpus is the positive control: measured 2026-10-10, of 12 81
 corpus) 8 186 passed SILENTLY on 1.3.0 in BOTH verifiers — `valid` unchanged, nothing in the receipt
 — and the two verifiers agreed with each other on every one of them (0 differential disagreements):
 agreement between two implementations by one author is not correctness. On 1.4.0: 12 818/12 818
-met their class, 0 disagreements (details in CHANGELOG 1.4.0).
+met their class, 0 disagreements (details in CHANGELOG 1.4.0). 1.5.0 adds `anchors` (the top-level key and every
+entry): measured 2026-10-11, 16 503 mutations from 37 sources, each met its class in both verifiers, 0 disagreements on
+16 540 files; the same corpus against the 1.4.1 verifiers: 788 (Python) and 689 (JS) mutations without their class.

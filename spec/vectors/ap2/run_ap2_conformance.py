@@ -41,7 +41,8 @@ def _normalize(r: dict) -> dict:
             "producer_present": prod.get("present"), "producer_ok": prod.get("ok"),
             "producer_trusted": prod.get("trusted"),
             "rfc3161_claimed": rfc.get("claimed"), "rfc3161_verified": rfc.get("verified"),
-            "self_asserted_only": r.get("self_asserted_only")}
+            "self_asserted_only": r.get("self_asserted_only"),
+            "anchors_verified": r.get("anchors_verified")}   # 1.5.0 — SPEC §3.3, the twelfth normative field
 
 
 def run(verify_fn=None) -> dict:
@@ -62,15 +63,19 @@ def run(verify_fn=None) -> dict:
             trusted_producer_keys=pol.get("trusted_producer_keys"),
             require_pq=bool(pol.get("require_pq")),
             require_producer=bool(pol.get("require_producer")),
-            require_anchor=bool(pol.get("require_anchor")))
+            require_anchor=bool(pol.get("require_anchor")),
+            **({"min_anchors": pol["min_anchors"]} if "min_anchors" in pol else {}))
         got = _normalize(receipt)
         want = exp["normative"]
         diffs = {k: {"want": want[k], "got": got.get(k)}
                  for k in want if got.get(k) != want[k]}
-        if "report" in exp:   # 1.4.0 (SPEC §7/§9.2): the per-artifact list of names ignored under a standard's rule
+        if "ignored" in exp.get("report", {}):   # 1.4.0 (SPEC §7/§9.2): the per-artifact list of names ignored under a standard's rule
             got_ignored = [a.get("ignored") for a in (receipt.get("artifacts") or [])]
             if got_ignored != exp["report"]["ignored"]:
                 diffs["report.ignored"] = {"want": exp["report"]["ignored"], "got": got_ignored}
+        if "refused" in exp.get("report", {}):   # 1.5.0 (SPEC §7): the exact refusal text, not any refusal
+            if receipt.get("refused") != exp["report"]["refused"]:
+                diffs["report.refused"] = {"want": exp["report"]["refused"], "got": receipt.get("refused")}
         ok = not diffs
         conformant = conformant and ok
         results.append({"vector": name, "status": "PASS" if ok else "FAIL",

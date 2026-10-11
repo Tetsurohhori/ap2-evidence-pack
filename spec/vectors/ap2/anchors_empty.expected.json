@@ -1,0 +1,22 @@
+{
+ "description": "anchor_valid plus an empty `anchors` list: when present it MUST be non-empty — a refusal (SPEC §3.3).",
+ "normative": {
+  "anchors_verified": 0,
+  "bindings_ok": false,
+  "digest_ok": false,
+  "policy_ok": false,
+  "pq_protected": false,
+  "producer_ok": null,
+  "producer_present": false,
+  "producer_trusted": null,
+  "rfc3161_claimed": false,
+  "rfc3161_verified": null,
+  "self_asserted_only": true,
+  "valid": false
+ },
+ "policy": {},
+ "report": {
+  "refused": "top level: anchors must be a non-empty list (SPEC §9.1)"
+ },
+ "vector": "anchors_empty"
+}

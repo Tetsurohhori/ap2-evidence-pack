@@ -1,6 +1,7 @@
 {
  "description": "The signed pack with producer_signatures REMOVED (downgrade attack). The digest still verifies — only the require_producer/require_pq policy rejects the strip.",
  "normative": {
+  "anchors_verified": 0,
   "bindings_ok": true,
   "digest_ok": true,
   "policy_ok": false,

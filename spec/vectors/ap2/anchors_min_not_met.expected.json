@@ -1,0 +1,21 @@
+{
+ "description": "anchor_valid unchanged under min_anchors 2: one verified anchor, two required — rejected on policy (SPEC §3.3).",
+ "normative": {
+  "anchors_verified": 1,
+  "bindings_ok": true,
+  "digest_ok": true,
+  "policy_ok": false,
+  "pq_protected": true,
+  "producer_ok": true,
+  "producer_present": true,
+  "producer_trusted": null,
+  "rfc3161_claimed": true,
+  "rfc3161_verified": true,
+  "self_asserted_only": true,
+  "valid": false
+ },
+ "policy": {
+  "min_anchors": 2
+ },
+ "vector": "anchors_min_not_met"
+}

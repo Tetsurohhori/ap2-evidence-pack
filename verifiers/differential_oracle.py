@@ -24,7 +24,8 @@ JS = ["node", os.environ.get("AP2_ORACLE_JS", os.path.join(HERE, "js", "ap2-veri
 # (RFC 4514 vs OpenSSL multi-line) with the JS one missing the validity a §6.7 MUST requires: none of it was visible here.
 KEYS = ("valid", "digest_ok", "bindings_ok", "producer_present", "producer_ok", "producer_trusted", "pq_protected",
         "rfc3161_claimed", "rfc3161_verified", "rfc3161_granted", "rfc3161_imprint_ok", "rfc3161_gen_time",
-        "policy_ok", "self_asserted_only", "chain_verified", "provenance_classes", "x5c_leaves")
+        "policy_ok", "self_asserted_only", "chain_verified", "provenance_classes",
+        "anchors_verified", "refused", "anchors", "x5c_leaves")   # 1.5.0: anchors_verified (normative), the refusal text, each anchor's facts
 
 
 def _load(path):
@@ -79,18 +80,29 @@ DECLARED = {
     # reference's alone — the JS verifier reports `chain_verified: null` / `tsa_verified: null` and never clears a flag or
     # passes a policy on their strength. NB the gen_time below is the probe TSA token's own genTime: regenerating the
     # anchor vectors changes it and this declaration must be updated with them (the run then reports the mismatch).
+    # 1.5.0: the same cause on `anchors` — two TSA-verified anchors in the reference, none counted in JS under --tsa-cert
+    "vector-anchors_two_valid-tsa-cert-bundle": {
+        "py": (True, True, True, True, True, None, True, True, True, True, True, "20260922175855Z", True, True, None, ("jwk_header",), 2, None,
+               (("rfc3161", True, True, True, "20261011172954Z"),), ()),
+        "js": (False, True, True, True, True, None, True, True, True, True, True, "20260922175855Z", False, True, None, ("jwk_header",), 0, None,
+               (("rfc3161", True, True, True, "20261011172954Z"),), ())},
+    "vector-anchors_two_valid-tsa-cert-one": {
+        "py": (False, True, True, True, True, None, True, True, True, True, True, "20260922175855Z", False, True, None, ("jwk_header",), 1, None,
+               (("rfc3161", True, True, True, "20261011172954Z"),), ()),
+        "js": (False, True, True, True, True, None, True, True, True, True, True, "20260922175855Z", False, True, None, ("jwk_header",), 0, None,
+               (("rfc3161", True, True, True, "20261011172954Z"),), ())},
     "vector-anchor_valid-tsa-cert": {
-        "py": (True, True, True, True, True, None, True, True, True, True, True, "20260922175855Z", True, True, None, ("jwk_header",), ()),
-        "js": (False, True, True, True, True, None, True, True, True, True, True, "20260922175855Z", False, True, None, ("jwk_header",), ())},
+        "py": (True, True, True, True, True, None, True, True, True, True, True, "20260922175855Z", True, True, None, ("jwk_header",), 1, None, (), ()),
+        "js": (False, True, True, True, True, None, True, True, True, True, True, "20260922175855Z", False, True, None, ("jwk_header",), 0, None, (), ())},
     "x5c-ca-issued-with-trust-anchor": {
-        "py": (True, True, True, False, None, None, False, False, None, None, None, None, True, False, True, ("x5c_header",), _LEAF_CA),
-        "js": (True, True, True, False, None, None, False, False, None, None, None, None, True, True, None, ("x5c_header",), _LEAF_CA)},
+        "py": (True, True, True, False, None, None, False, False, None, None, None, None, True, False, True, ("x5c_header",), 0, None, (), _LEAF_CA),
+        "js": (True, True, True, False, None, None, False, False, None, None, None, None, True, True, None, ("x5c_header",), 0, None, (), _LEAF_CA)},
     "mixed-self-asserted-mandate-plus-chained-artifact": {
-        "py": (True, True, True, False, None, None, False, False, None, None, None, None, True, True, True, ("jwk_header", "x5c_header"), _LEAF_MIX),
-        "js": (True, True, True, False, None, None, False, False, None, None, None, None, True, True, None, ("jwk_header", "x5c_header"), _LEAF_MIX)},
+        "py": (True, True, True, False, None, None, False, False, None, None, None, None, True, True, True, ("jwk_header", "x5c_header"), 0, None, (), _LEAF_MIX),
+        "js": (True, True, True, False, None, None, False, False, None, None, None, None, True, True, None, ("jwk_header", "x5c_header"), 0, None, (), _LEAF_MIX)},
     "x5c-self-signed-with-trust-anchor": {
-        "py": (True, True, True, False, None, None, False, False, None, None, None, None, True, True, False, ("x5c_header",), _LEAF_SELF),
-        "js": (True, True, True, False, None, None, False, False, None, None, None, None, True, True, None, ("x5c_header",), _LEAF_SELF)}}
+        "py": (True, True, True, False, None, None, False, False, None, None, None, None, True, True, False, ("x5c_header",), 0, None, (), _LEAF_SELF),
+        "js": (True, True, True, False, None, None, False, False, None, None, None, None, True, True, None, ("x5c_header",), 0, None, (), _LEAF_SELF)}}
 
 
 def _matches_declared(name, py, js):
@@ -110,7 +122,19 @@ def flags_for(policy):
     for name in ("require_producer", "require_pq", "require_anchor"):
         if policy.get(name):
             fl.append("--" + name.replace("_", "-"))
+    if "min_anchors" in policy:   # 1.5.0 — SPEC §3.3
+        fl += ["--min-anchors", str(policy["min_anchors"])]
     return fl
+
+
+def _refused_key(text):
+    """The refusal text is compared EXACTLY where the SPEC fixes it — the closed-schema refusals of §9.1 and the anchors
+    refusals of §3.3 (`<object>: unknown key "x" (SPEC §9.1)` …); elsewhere (profile parse errors: UTF-8, floats, depth)
+    the SPEC fixes only that the file is refused, and the two verifiers word it differently (measured 2026-10-11, 9 files,
+    same verdict), so only the presence of a refusal is compared."""
+    if text is None:
+        return None
+    return text if ("(SPEC §9.1)" in text or "(SPEC §3.3)" in text) else "<refused>"
 
 
 def run(cmd, path, flags):
@@ -121,7 +145,10 @@ def run(cmd, path, flags):
                        for a in (r.get("artifacts") or []) if a.get("x5c_leaf"))   # identity only: chain_verified is the declared divergence, compared at top level
         return (r.get("valid"), r.get("digest_ok"), r.get("bindings_ok"), prod.get("present"), prod.get("ok"), prod.get("trusted"),
                 r.get("pq_protected"), ts.get("claimed"), ts.get("verified"), ts.get("granted"), ts.get("imprint_ok"), ts.get("gen_time"),
-                r.get("policy_ok"), r.get("self_asserted_only"), r.get("chain_verified"), tuple(r.get("provenance_classes") or ()), leaves)
+                r.get("policy_ok"), r.get("self_asserted_only"), r.get("chain_verified"), tuple(r.get("provenance_classes") or ()),
+                r.get("anchors_verified"), _refused_key(r.get("refused")),
+                tuple((a.get("mechanism"), a.get("verified"), a.get("granted"), a.get("imprint_ok"), a.get("gen_time")) for a in (r.get("anchors") or [])),
+                leaves)
     except Exception:  # noqa: BLE001
         return ("NONJSON/CRASH:" + os.path.basename(cmd[-1] if cmd[-1] != "verify" else cmd[-2]),) * len(KEYS)   # distinct per verifier: two crashes never agree
 
@@ -228,6 +255,11 @@ def build_cases(d):
     cases["tsr-self-forged-binding-only"] = (w("forged", json.dumps(e)), ["--require-anchor"])
     cases["tsr-self-forged-tsa-cert"] = (w("forged2", json.dumps(e)), ["--require-anchor", "--tsa-cert", os.path.join(vdir, "anchor_probe_tsa.crt")])
     cases["vector-anchor_valid-tsa-cert"] = (os.path.join(vdir, "anchor_valid.json"), ["--require-anchor", "--tsa-cert", os.path.join(vdir, "anchor_probe_tsa.crt")])
+    with open(os.path.join(vdir, "anchor_probe_tsa.crt"), "rb") as f1, open(os.path.join(vdir, "anchor_probe_tsa2.crt"), "rb") as f2:   # 1.5.0: a PEM bundle of both TSAs
+        bundle = w("tsa_bundle", f1.read() + f2.read())
+    cases["vector-anchors_two_valid-tsa-cert-bundle"] = (os.path.join(vdir, "anchors_two_valid.json"), ["--min-anchors", "2", "--tsa-cert", bundle])
+    # only the FIRST TSA's certificate: the second anchor binds but is not TSA-verified, so it does not count (SPEC §3.3)
+    cases["vector-anchors_two_valid-tsa-cert-one"] = (os.path.join(vdir, "anchors_two_valid.json"), ["--min-anchors", "2", "--tsa-cert", os.path.join(vdir, "anchor_probe_tsa.crt")])
     e = copy.deepcopy(base); e["artifacts"][0]["resolved_claims"]["extra"] = "x"; cases["claims-mismatch-rehashed"] = (w("claims", json.dumps(rehash(e))), [])
     e = copy.deepcopy(base); e["bindings"] = []; cases["bindings-dropped-rehashed"] = (w("bind", json.dumps(rehash(e))), [])
     # producer block shapes

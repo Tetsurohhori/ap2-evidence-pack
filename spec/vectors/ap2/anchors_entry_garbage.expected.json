@@ -1,0 +1,19 @@
+{
+ "description": "anchor_valid plus an `anchors` entry whose token is not a TimeStampResp: a claimed anchor that fails rejects the pack even though the rfc3161_timestamp token verifies — an anchor is never ignored because another one verifies (SPEC §3.3).",
+ "normative": {
+  "anchors_verified": 1,
+  "bindings_ok": true,
+  "digest_ok": true,
+  "policy_ok": true,
+  "pq_protected": true,
+  "producer_ok": true,
+  "producer_present": true,
+  "producer_trusted": null,
+  "rfc3161_claimed": true,
+  "rfc3161_verified": false,
+  "self_asserted_only": true,
+  "valid": false
+ },
+ "policy": {},
+ "vector": "anchors_entry_garbage"
+}

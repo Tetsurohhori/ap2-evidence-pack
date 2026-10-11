@@ -1,6 +1,7 @@
 {
  "description": "A CLAIMED RFC 3161 anchor whose token is garbage: cryptographic token verification fails, so the pack rejects even without policy flags — a claimed-but-false anchor is tamper, never a soft warning.",
  "normative": {
+  "anchors_verified": 0,
   "bindings_ok": true,
   "digest_ok": true,
   "policy_ok": false,

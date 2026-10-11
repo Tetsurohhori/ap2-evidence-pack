@@ -1,0 +1,19 @@
+{
+ "description": "anchor_valid plus a REAL granted token from the second probe TSA for another digest: the messageImprint does not equal the recomputed digest, so that anchor fails and so does the pack (SPEC §3.2, §3.3).",
+ "normative": {
+  "anchors_verified": 1,
+  "bindings_ok": true,
+  "digest_ok": true,
+  "policy_ok": true,
+  "pq_protected": true,
+  "producer_ok": true,
+  "producer_present": true,
+  "producer_trusted": null,
+  "rfc3161_claimed": true,
+  "rfc3161_verified": false,
+  "self_asserted_only": true,
+  "valid": false
+ },
+ "policy": {},
+ "vector": "anchors_entry_wrong_digest"
+}

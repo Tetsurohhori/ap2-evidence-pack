@@ -69,7 +69,9 @@ HOSTILE_QUICK = [None, "", {}, "x"]
 # `enum` marks a string key with a constrained value, so the hostile string "x" is a violation there (a free string is not).
 S, B, L, O, ANY = "str", "bool", "list", "obj", "any"
 TOP = {"evidence_format": (S, 1, 1), "subject": (S, 1, 0), "created_utc": (S, 1, 1), "artifacts": (L, 1, 0), "bindings": (L, 0, 0),
-       "honest_scope": (S, 1, 1), "evidence_digest_sha256": (S, 1, 0), "rfc3161_timestamp": (O, 0, 0), "producer_signatures": (O, 0, 0)}
+       "honest_scope": (S, 1, 1), "evidence_digest_sha256": (S, 1, 0), "rfc3161_timestamp": (O, 0, 0), "producer_signatures": (O, 0, 0),
+       "anchors": ("nelist", 0, 0)}   # 1.5.0 — SPEC §3.3: a non-empty list
+ANCH = {"mechanism": (S, 1, 1), "tsr_b64": (S, 1, 0), "tsa_url": (S, 0, 0), "note": (S, 0, 0)}   # SPEC §9.1 anchors[i] (mechanism: "rfc3161")
 RFC = {"anchored": (B, 1, 0), "tsr_b64": (S, 0, 0), "tsa_url": (S, 0, 0), "tsa": (S, 0, 0), "note": (S, 0, 0)}
 PROD = {"scheme": (S, 1, 1), "over": (S, 1, 1), "signatures": (L, 1, 0)}
 ENTRY = {"sig_alg": (S, 1, 0), "public_key_b64": (S, 1, 1), "signature_b64": (S, 1, 1), "post_quantum": (B, 1, 0)}
@@ -78,7 +80,7 @@ ART = {"name": (S, 1, 0), "sd_jwt_compact": (S, 1, 1), "header": (O, 1, 0), "key
 KEY = {"jwk": (O, 1, 0), "provenance_class": (S, 1, 1), "note": (S, 0, 0), "x5c_chain_sha256": (L, 0, 0), "jwks_url": (S, 0, 0), "jwks_sha256": (S, 0, 0), "fetched_utc": (S, 0, 0)}
 KBC = {"present": (B, 1, 0), "verified": ("bool_or_null", 0, 0), "signature_ok": (B, 0, 0), "sd_hash_ok": (B, 0, 0), "note": ("str_or_null", 0, 0), "claims_recorded_not_validated": (O, 0, 0)}
 VAB = {"signature_ok": ("true", 1, 0), "disclosures_ok": ("true", 1, 0)}
-PYTYPE = {S: str, B: bool, L: list, O: dict, ANY: object, "bool_or_null": bool, "str_or_null": str, "true": bool}
+PYTYPE = {S: str, B: bool, L: list, O: dict, ANY: object, "bool_or_null": bool, "str_or_null": str, "true": bool, "nelist": list}
 
 
 def _wrong_type(kind, value):
@@ -87,6 +89,7 @@ def _wrong_type(kind, value):
     if kind == "bool_or_null": return not (value is None or isinstance(value, bool))
     if kind == "str_or_null": return not (value is None or isinstance(value, str))
     if kind == "true": return value is not True
+    if kind == "nelist": return not (isinstance(value, list) and len(value) > 0)
     return type(value) is not PYTYPE[kind]
 
 
@@ -96,16 +99,16 @@ def canon(obj) -> bytes:
 
 
 def rehash(ev: dict) -> dict:
-    e2 = {k: v for k, v in ev.items() if k not in ("evidence_digest_sha256", "rfc3161_timestamp", "producer_signatures")}
+    e2 = {k: v for k, v in ev.items() if k not in UNSEALED_TOP}
     ev = dict(ev); ev["evidence_digest_sha256"] = hashlib.sha256(canon(e2)).hexdigest(); ev.pop("producer_signatures", None); return ev
 
 
-UNSEALED_TOP = ("evidence_digest_sha256", "rfc3161_timestamp", "producer_signatures")
+UNSEALED_TOP = ("evidence_digest_sha256", "rfc3161_timestamp", "producer_signatures", "anchors")   # SPEC §3 (1.5.0: + anchors)
 
 
 def strip(ev: dict) -> dict:
     """The sealed content alone, resealed: no producer block, no anchor block — a source whose verdict rests on the content."""
-    ev = rehash(ev); ev.pop("rfc3161_timestamp", None); return ev
+    ev = rehash(ev); ev.pop("rfc3161_timestamp", None); ev.pop("anchors", None); return ev
 
 
 def flags_for(policy: dict):
@@ -116,6 +119,8 @@ def flags_for(policy: dict):
     for name in ("require_producer", "require_pq", "require_anchor"):
         if policy.get(name):
             fl.append("--" + name.replace("_", "-"))
+    if "min_anchors" in policy:   # 1.5.0 — SPEC §3.3
+        fl += ["--min-anchors", str(policy["min_anchors"])]
     return fl
 
 
@@ -187,6 +192,9 @@ class Corpus:
         out = [("top", lambda e: (None, None), TOP, REFUSE, True, None, None)]
         if isinstance(ev.get("rfc3161_timestamp"), dict):
             out.append(("rfc3161_timestamp", lambda e: (e, "rfc3161_timestamp"), RFC, REFUSE, False, None, None))
+        for j, an in enumerate(ev.get("anchors") or []):   # 1.5.0 — SPEC §3.3/§9.1: every entry is a closed object outside the digest
+            if isinstance(an, dict):
+                out.append((f"anchors[{j}]", (lambda j: lambda e: (e["anchors"], j))(j), ANCH, REFUSE, False, None, None))
         if isinstance(ev.get("producer_signatures"), dict):
             out.append(("producer_signatures", lambda e: (e, "producer_signatures"), PROD, REFUSE, False, None, None))
             for j, s in enumerate(ev["producer_signatures"].get("signatures", [])):
@@ -269,8 +277,8 @@ class Corpus:
                 if isinstance(h, str) and h and not enum:
                     continue
                 cls = unknown_cls
-                if label == "rfc3161_timestamp" and k == "tsr_b64" and isinstance(h, str):
-                    cls = ANCHOR_FALSE    # "x" is a string: not a shape violation, a token that does not decode (SPEC §3.2)
+                if (label == "rfc3161_timestamp" or label.startswith("anchors[")) and k == "tsr_b64" and isinstance(h, str):
+                    cls = ANCHOR_FALSE    # "x" is a string: not a shape violation, a token that does not decode (SPEC §3.2, §3.3)
                 if label.startswith("artifacts[") and table is ART and k == "name":
                     cls = REFUSE          # SPEC §2: a non-string name is a refusal, checked before the artifact loop
                 if label.startswith("artifacts[") and table is ART and k == "resolved_claims":
@@ -423,6 +431,7 @@ def kwargs_for(flags):
         elif f == "--require-producer": kw["require_producer"] = True; i += 1
         elif f == "--require-pq": kw["require_pq"] = True; i += 1
         elif f == "--require-anchor": kw["require_anchor"] = True; i += 1
+        elif f == "--min-anchors": kw["min_anchors"] = int(flags[i + 1]); i += 2   # 1.5.0 — SPEC §3.3
         else: raise ValueError(f)
     return kw
 

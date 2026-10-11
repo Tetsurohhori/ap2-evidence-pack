@@ -75,7 +75,8 @@ def _write(name: str, pack: dict, expected: dict) -> None:
 
 
 def _expected(name, desc, policy, normative, requires=None):
-    e = {"vector": name, "description": desc, "policy": policy, "normative": normative}
+    # 1.5.0 — SPEC §3.3: the twelfth normative field; none of these vectors carries a verifying anchor besides anchor_valid
+    e = {"vector": name, "description": desc, "policy": policy, "normative": {"anchors_verified": 0, **normative}}
     if requires:
         e["requires"] = requires
     return e

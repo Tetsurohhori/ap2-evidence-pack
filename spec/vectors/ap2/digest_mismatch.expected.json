@@ -1,6 +1,7 @@
 {
  "description": "One content field altered after sealing: the recomputed digest no longer matches, and the producer signatures (over the recomputed digest) fail with it.",
  "normative": {
+  "anchors_verified": 0,
   "bindings_ok": true,
   "digest_ok": false,
   "policy_ok": true,

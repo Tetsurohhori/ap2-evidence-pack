@@ -1,6 +1,7 @@
 {
  "description": "The same header with crit: [\"ap2_ext\"]. RFC 7515 §4.1.11: an extension named in crit that the recipient does not understand makes the JWS INVALID — this format understands no extension, so the artifact errors and the pack is not valid (SPEC §9.2).",
  "normative": {
+  "anchors_verified": 0,
   "bindings_ok": false,
   "digest_ok": true,
   "policy_ok": true,

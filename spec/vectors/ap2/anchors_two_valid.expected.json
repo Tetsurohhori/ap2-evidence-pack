@@ -1,0 +1,21 @@
+{
+ "description": "anchor_valid plus a token from a second probe TSA (certificate anchor_probe_tsa2.crt) in `anchors`: two DISTINCT anchors bound to the recomputed digest, so min_anchors 2 is met (SPEC §3.3). The sealed content and the producer signatures are those of anchor_valid: `anchors` lies outside the digest.",
+ "normative": {
+  "anchors_verified": 2,
+  "bindings_ok": true,
+  "digest_ok": true,
+  "policy_ok": true,
+  "pq_protected": true,
+  "producer_ok": true,
+  "producer_present": true,
+  "producer_trusted": null,
+  "rfc3161_claimed": true,
+  "rfc3161_verified": true,
+  "self_asserted_only": true,
+  "valid": true
+ },
+ "policy": {
+  "min_anchors": 2
+ },
+ "vector": "anchors_two_valid"
+}

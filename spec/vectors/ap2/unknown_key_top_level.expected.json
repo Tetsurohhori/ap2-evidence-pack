@@ -1,6 +1,7 @@
 {
  "description": "The valid pack SEALED with a top-level key this format does not define (digest recomputed over it, producer signatures dropped). SPEC §9.1: the top-level object is closed — a refusal naming the key, never a silent pass. On 1.3.0 this pack was valid: true.",
  "normative": {
+  "anchors_verified": 0,
   "bindings_ok": false,
   "digest_ok": false,
   "policy_ok": false,

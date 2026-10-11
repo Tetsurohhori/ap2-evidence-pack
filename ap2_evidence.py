@@ -486,7 +486,12 @@ def _check_closed(obj, what: str, allowed: Dict[str, tuple], err=None):
 
 _TOP_KEYS = {"evidence_format": (_is_str, "a string", True), "subject": (_is_str, "a string", True), "created_utc": (_is_str, "a string", True),
              "artifacts": (_is_list, "a list", True), "bindings": (_is_list, "a list", False), "honest_scope": (_is_str, "a string", True),
-             "evidence_digest_sha256": (_is_str, "a string", True), "rfc3161_timestamp": (_is_obj, "an object", False), "producer_signatures": (_is_obj, "an object", False)}
+             "evidence_digest_sha256": (_is_str, "a string", True), "rfc3161_timestamp": (_is_obj, "an object", False), "producer_signatures": (_is_obj, "an object", False),
+             "anchors": (lambda v: isinstance(v, list) and len(v) > 0, "a non-empty list", False)}   # 1.5.0 — SPEC §3.3
+_ANCHOR_MECHANISMS = ("rfc3161",)   # SPEC §3.3: the mechanisms this revision defines; any other is a refusal naming it
+_ANCHOR_RFC3161_KEYS = {"mechanism": (lambda v: v == "rfc3161", '"rfc3161"', True), "tsr_b64": (_is_str, "a string", True),
+                        "tsa_url": (_is_str, "a string", False), "note": (_is_str, "a string", False)}
+_DIGEST_EXCLUDED = ("evidence_digest_sha256", "rfc3161_timestamp", "producer_signatures", "anchors")   # SPEC §3 (1.5.0: + anchors)
 _RFC3161_KEYS = {"anchored": (_is_bool, "a boolean", True), "tsr_b64": (_is_str, "a string", False),   # tsr_b64 ABSENT under anchored: §6.4 says rfc3161_verified false, not a refusal
                  "tsa_url": (_is_str, "a string", False), "tsa": (_is_str, "a string", False), "note": (_is_str, "a string", False)}
 _PRODUCER_KEYS = {"scheme": (lambda v: v in ("hybrid", "classical-only"), '"hybrid" or "classical-only"', True),
@@ -961,7 +966,8 @@ def build_evidence(artifacts: List[Dict], out_path: str,
                    keys: Optional[Dict[str, Dict]] = None,
                    jwks_urls: Optional[Dict[str, str]] = None,
                    tsa_url: Optional[str] = None,
-                   subject: str = "agentic-payment mandate evidence") -> Dict:
+                   subject: str = "agentic-payment mandate evidence",
+                   extra_tsa_urls: Optional[List[str]] = None) -> Dict:
     """artifacts: [{name, sd_jwt}]. Verifies every artifact NOW, snapshots the key material
     used, records bindings, and writes ONE self-contained evidence file. Any artifact that
     fails to verify aborts the build (an evidence file must never contain a red light
@@ -1007,12 +1013,49 @@ def build_evidence(artifacts: List[Dict], out_path: str,
     evidence["rfc3161_timestamp"] = (
         _rfc3161_stamp(evidence["evidence_digest_sha256"], tsa_url)
         if tsa_url else {"anchored": False, "note": "no TSA provided"})
+    # 1.5.0 — SPEC §3.3: every further TSA goes to `anchors` (the first stays in rfc3161_timestamp, so a pack built with one
+    # TSA is still read by 1.4.x verifiers); an anchor that could not be obtained is NOT written (an entry is a token or
+    # nothing) and is reported in the build result
+    added, failed = [], []
+    for u in extra_tsa_urls or []:
+        st = _rfc3161_stamp(evidence["evidence_digest_sha256"], u)
+        if st.get("anchored"):
+            added.append({"mechanism": "rfc3161", "tsr_b64": st["tsr_b64"], "tsa_url": u})
+        else:
+            failed.append({"tsa_url": u, "note": st.get("note")})
+    if added:
+        evidence["anchors"] = added
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(evidence, f, ensure_ascii=False, indent=1, sort_keys=True)
     return {"out": out_path, "artifacts": len(entries),
             "bindings": len(evidence["bindings"]),
             "evidence_digest_sha256": evidence["evidence_digest_sha256"],
-            "rfc3161_anchored": evidence["rfc3161_timestamp"].get("anchored", False)}
+            "rfc3161_anchored": evidence["rfc3161_timestamp"].get("anchored", False),
+            "anchors_added": len(added), **({"anchors_failed": failed} if failed else {})}
+
+
+def add_anchor(path: str, tsa_url: str) -> Dict:
+    """1.5.0 — SPEC §3.3: append one RFC 3161 anchor to an EXISTING pack (a second TSA, or a renewal before the first TSA's
+    certificate ages out). The token is requested for the digest RECOMPUTED from the sealed content, and the pack is
+    refused unchanged when that differs from the declared digest (stamping a pack that does not verify would attest
+    nothing). The digest and the producer signatures do not change: `anchors` lies outside them. Written atomically."""
+    ev = read_evidence_file(path)
+    if ev.get("evidence_format") != EVIDENCE_FORMAT:
+        raise Ap2EvidenceError(f"evidence_format must be {EVIDENCE_FORMAT!r}")
+    digest = hashlib.sha256(_canon({k: v for k, v in ev.items() if k not in _DIGEST_EXCLUDED})).hexdigest()
+    if digest != ev.get("evidence_digest_sha256"):
+        raise Ap2EvidenceError("the declared evidence_digest_sha256 does not match the sealed content: not stamped")
+    if "anchors" in ev and not (isinstance(ev["anchors"], list) and ev["anchors"]):
+        raise Ap2EvidenceError("anchors must be a non-empty list (SPEC §3.3): not stamped")
+    st = _rfc3161_stamp(digest, tsa_url)
+    if not st.get("anchored"):
+        raise Ap2EvidenceError(f"no anchor obtained: {st.get('note')}")
+    ev.setdefault("anchors", []).append({"mechanism": "rfc3161", "tsr_b64": st["tsr_b64"], "tsa_url": tsa_url})
+    tmp = path + ".tmp-stamp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(ev, f, ensure_ascii=False, indent=1, sort_keys=True)
+    os.replace(tmp, path)
+    return {"out": path, "evidence_digest_sha256": digest, "anchors": len(ev["anchors"])}
 
 
 def sign_evidence(path, identity=None, classical_alg="ed25519"):
@@ -1048,9 +1091,16 @@ def _chain_verdict(trust_anchor, art_results):
     return all(x.get("chain_verified") is True for x in attempted)
 
 
+def _gt_key(gt: str):
+    """Order key of a GeneralizedTime `YYYYMMDDHHMMSS[.f]Z` (the only shape parse_timestamp_resp reports): whole seconds, then
+    the fraction as a number — a string comparison put "…00.5Z" before "…00Z" ('.' < 'Z')."""
+    whole, _, frac = gt.rstrip("Z").partition(".")
+    return (whole, float("0." + frac) if frac else 0.0)
+
+
 def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = False,
                     require_producer: bool = False, require_anchor: bool = False, tsa_cert: Optional[str] = None,
-                    trust_anchor: Optional[str] = None) -> Dict:
+                    trust_anchor: Optional[str] = None, min_anchors: Optional[int] = None) -> Dict:
     """OFFLINE re-verification from the evidence file alone: digest, every signature with
     the SNAPSHOTTED key, every disclosure, every binding, and the RFC 3161 token's binding
     (status + imprint; the TSA itself only with `tsa_cert`, via openssl). Fail-closed."""
@@ -1058,11 +1108,11 @@ def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = Fa
         ev = read_evidence_file(path)
     except Ap2EvidenceError as e:   # 1.1.0: a hostile or unreadable file is a refusal receipt, never a traceback
         return {"digest_ok": False, "artifacts": [], "producer_signatures": {"present": False, "pq_protected": False, "trusted": None},
-                "pq_protected": False, "bindings_ok": False, "rfc3161": {"claimed": False, "verified": None}, "provenance_classes": [],
+                "pq_protected": False, "bindings_ok": False, "rfc3161": {"claimed": False, "verified": None}, "anchors": [], "anchors_verified": 0, "provenance_classes": [],
                 "self_asserted_only": True, "chain_verified": None, "policy_ok": False, "valid": False, "honest_scope": None, "refused": str(e)}
     def refusal(msg):
         return {"digest_ok": False, "artifacts": [], "producer_signatures": {"present": False, "pq_protected": False, "trusted": None},
-                "pq_protected": False, "bindings_ok": False, "rfc3161": {"claimed": False, "verified": None}, "provenance_classes": [],
+                "pq_protected": False, "bindings_ok": False, "rfc3161": {"claimed": False, "verified": None}, "anchors": [], "anchors_verified": 0, "provenance_classes": [],
                 "self_asserted_only": True, "chain_verified": None, "policy_ok": False, "valid": False, "honest_scope": None, "refused": msg}
     # 1.1.0 (review r1): the SHAPE of the top-level fields is checked before anything touches them — `artifacts` a list of
     # objects, `bindings` a list, `rfc3161_timestamp` an object or absent, `producer_signatures` an object or absent. A wrong
@@ -1104,10 +1154,19 @@ def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = Fa
             _check_closed(ev["producer_signatures"], "producer_signatures", _PRODUCER_KEYS)
         for i, b in enumerate(ev.get("bindings", [])):
             _check_closed(b, f"bindings[{i}]", _BINDING_KEYS)
+        for i, an in enumerate(ev.get("anchors", [])):   # 1.5.0 — SPEC §3.3/§9.1: closed entries, the mechanism first
+            if not isinstance(an, dict):
+                raise Ap2EvidenceError(f"anchors[{i}] must be an object (SPEC §9.1)")
+            if "mechanism" not in an:
+                raise Ap2EvidenceError(f"anchors[{i}]: missing mechanism (SPEC §9.1)")
+            if not isinstance(an["mechanism"], str):
+                raise Ap2EvidenceError(f"anchors[{i}]: mechanism must be a string (SPEC §9.1)")
+            if an["mechanism"] not in _ANCHOR_MECHANISMS:
+                raise Ap2EvidenceError(f"anchors[{i}]: mechanism {_jkey(an['mechanism'])} is not defined by this revision (SPEC §3.3)")
+            _check_closed(an, f"anchors[{i}]", _ANCHOR_RFC3161_KEYS)
     except Ap2EvidenceError as e:
         return refusal(str(e))
-    e2 = {k: v for k, v in ev.items()
-          if k not in ("evidence_digest_sha256", "rfc3161_timestamp", "producer_signatures")}
+    e2 = {k: v for k, v in ev.items() if k not in _DIGEST_EXCLUDED}
     recomputed_digest = hashlib.sha256(_canon(e2)).hexdigest()
     digest_ok = recomputed_digest == ev.get("evidence_digest_sha256")
 
@@ -1118,7 +1177,20 @@ def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = Fa
         rfc = {"claimed": True, **_verify_rfc3161(ts["tsr_b64"], recomputed_digest, tsa_cert=tsa_cert)}
     elif ts.get("anchored"):
         rfc = {"claimed": True, "verified": False, "note": "anchored claimed but tsr_b64 absent"}
-    proven_time = rfc.get("gen_time") if rfc.get("tsa_verified") is True else None
+    # 1.5.0 — SPEC §3.3: every `anchors` entry checked like the block above; COUNTING = binding verified (+ TSA-verified when
+    # --tsa-cert was given); DISTINCT = different token bytes (a copied token is one anchor); any failing claim fails the pack
+    anchor_results = [{"mechanism": an["mechanism"], "claimed": True, **_verify_rfc3161(an["tsr_b64"], recomputed_digest, tsa_cert=tsa_cert)}
+                      for an in ev.get("anchors", [])]
+    counted, earliest = set(), None
+    for r_, tok in ([(rfc, ts.get("tsr_b64"))] if rfc.get("claimed") else []) + [(r_, an["tsr_b64"]) for r_, an in zip(anchor_results, ev.get("anchors", []))]:
+        if r_.get("verified") is True and (tsa_cert is None or r_.get("tsa_verified") is True):
+            counted.add(_sigsuite._unb64(tok))
+            if r_.get("tsa_verified") is True and r_.get("gen_time") and (earliest is None or _gt_key(r_["gen_time"]) < _gt_key(earliest)):
+                earliest = r_["gen_time"]
+    anchors_verified = len(counted)
+    if anchor_results:   # the aggregate of §3.3; without `anchors` the block is exactly what 1.4.x reported
+        rfc = dict(rfc, claimed=True, verified=(False if (rfc.get("verified") is False or any(x.get("verified") is not True for x in anchor_results)) else True))
+    proven_time = earliest
 
     art_results, all_ok = [], True
     for_bindings = []
@@ -1208,14 +1280,14 @@ def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = Fa
     # require_anchor: the existed-by claim must be PROVEN, not merely claimed. A missing
     # anchor, an unverifiable one (no openssl -> verified None), or a failing token all
     # reject — fail-closed, "claimed" never upgrades to "proven".
-    if require_anchor and rfc.get("verified") is not True:
-        policy_ok = False
-    if require_anchor and tsa_cert is not None and rfc.get("tsa_verified") is not True:
+    need = max(1 if require_anchor else 0, min_anchors or 0)   # SPEC §3.3: require_anchor alone is min_anchors = 1
+    if need and anchors_verified < need:
         policy_ok = False
 
     return {"digest_ok": digest_ok, "artifacts": art_results,
             "producer_signatures": producer, "pq_protected": producer.get("pq_protected", False),
             "bindings_ok": bindings_ok, "rfc3161": rfc,
+            "anchors": anchor_results, "anchors_verified": anchors_verified,   # 1.5.0 — SPEC §3.3
             "provenance_classes": classes,
             # r7 FAIL-CLOSED, r10 with ANY: the flag warns that a key in this pack is self-asserted, so ONE reconciled
             # artifact must not clear it for the others — measured: a pack whose mandate was `jwk_header` and whose second
@@ -1253,8 +1325,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="supplied verification JWK for an artifact")
     b.add_argument("--jwks-url", action="append", default=[], metavar="name=https://...",
                    help="fetch the key from a JWKS at build time (TLS witness)")
-    b.add_argument("--tsa", help="RFC 3161 TSA URL (optional third-party time anchor)")
+    b.add_argument("--tsa", action="append", default=[], help="RFC 3161 TSA URL (optional third-party time anchor); may repeat: the first goes to rfc3161_timestamp, the others to anchors (SPEC §3.3)")
     b.add_argument("--subject", default="agentic-payment mandate evidence")
+    st = sub.add_parser("stamp", allow_abbrev=False, add_help=False)   # 1.5.0 — SPEC §3.3: add an anchor to an existing pack
+    st.add_argument("evidence")
+    st.add_argument("--tsa", required=True, help="RFC 3161 TSA URL: append its token to `anchors`")
     v = sub.add_parser("verify", allow_abbrev=False, add_help=False)
     v.add_argument("evidence")
     v.add_argument("--trusted-producer-key", action="append", default=None, metavar="ALG=B64",
@@ -1263,6 +1338,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     v.add_argument("--require-pq", action="store_true", help="policy: a valid, PINNED post-quantum producer signature is required")
     v.add_argument("--require-anchor", action="store_true", help="policy: the RFC 3161 anchor must be present and BOUND to this pack (status granted, messageImprint = digest); with --tsa-cert also TSA-verified")
     v.add_argument("--trust-anchor", help="PEM trust anchor: validate the artifact x5c chain with openssl verify. Without it every key is self-asserted (offline, a certificate proves only that the signer wrote it) — the JS verifier cannot validate chains and reports chain_verified null (declared)")
+    v.add_argument("--min-anchors", help="policy: at least N distinct anchors must verify (SPEC §3.3; --require-anchor alone is 1)")
     v.add_argument("--tsa-cert", help="PEM certificate (or chain) of the TSA: verify the token's signature and chain with openssl ts -verify (without it, the TSA is NOT verified — declared)")
     raw = list(sys.argv[1:] if argv is None else argv)
     # 1.1.0: one CLI grammar with the sibling verifiers — "" or a flag as a value, "--", -h/--help, a value on a boolean flag,
@@ -1272,12 +1348,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     i = 0
     while i < len(raw):
         tok = raw[i]
-        if tok in ("--trusted-producer-key", "--key", "--jwks-url", "--tsa", "--subject", "--tsa-cert", "--trust-anchor"):
+        if tok in ("--trusted-producer-key", "--key", "--jwks-url", "--tsa", "--subject", "--tsa-cert", "--trust-anchor", "--min-anchors"):
             val = raw[i + 1] if i + 1 < len(raw) else None
             if val is None or val == "" or val.startswith("-"):
                 p.error(f"{tok} needs a value (got {val!r})")
             i += 2; continue
-        if tok.split("=", 1)[0] in ("--trusted-producer-key", "--key", "--jwks-url", "--tsa", "--subject", "--tsa-cert", "--trust-anchor") and "=" in tok:
+        if tok.split("=", 1)[0] in ("--trusted-producer-key", "--key", "--jwks-url", "--tsa", "--subject", "--tsa-cert", "--trust-anchor", "--min-anchors") and "=" in tok:
             val = tok.split("=", 1)[1]
             if val == "" or val.startswith("-"):
                 p.error(f"{tok.split('=', 1)[0]} needs a value (got {val!r})")
@@ -1312,7 +1388,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         jwks = dict(_pair("--jwks-url", s) for s in a.jwks_url)
         try:
             print(json.dumps(build_evidence(arts, a.out, keys=keys, jwks_urls=jwks,
-                                            tsa_url=a.tsa, subject=a.subject), indent=1))
+                                            tsa_url=(a.tsa[0] if a.tsa else None), subject=a.subject,
+                                            extra_tsa_urls=a.tsa[1:]), indent=1))
+            return 0
+        except Ap2EvidenceError as e:
+            print(json.dumps({"error": str(e)}), file=sys.stderr)
+            return 1
+    if a.cmd == "stamp":
+        if a.evidence == "" or a.evidence.startswith("-"):
+            p.error(f"evidence path needs a value (got {a.evidence!r})")
+        try:
+            print(json.dumps(add_anchor(a.evidence, a.tsa), indent=1))
             return 0
         except Ap2EvidenceError as e:
             print(json.dumps({"error": str(e)}), file=sys.stderr)
@@ -1320,6 +1406,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     if a.cmd == "verify":
         if a.evidence == "" or a.evidence.startswith("-"):
             p.error(f"evidence path needs a value (got {a.evidence!r})")
+        min_anchors = None
+        if a.min_anchors is not None:
+            if not re.fullmatch(r"[1-9][0-9]{0,5}", a.min_anchors):   # ASCII digits, >= 1 (the JS verifier: the same grammar)
+                p.error(f"--min-anchors expects an integer >= 1 (got {a.min_anchors!r})")
+            min_anchors = int(a.min_anchors)
         trusted = None
         if a.trusted_producer_key:
             trusted = {}
@@ -1330,7 +1421,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 trusted.setdefault(alg, []).append(key)
         r = verify_evidence(a.evidence, trusted_producer_keys=trusted, require_pq=a.require_pq,
                             require_producer=a.require_producer, require_anchor=a.require_anchor, tsa_cert=a.tsa_cert,
-                            trust_anchor=a.trust_anchor)
+                            trust_anchor=a.trust_anchor, min_anchors=min_anchors)
         print(json.dumps(r, indent=1))
         return 0 if r["valid"] else 1
     p.print_help(sys.stderr)   # r3: usage goes to stderr, no verdict on stdout — as every other usage path and the JS verifier

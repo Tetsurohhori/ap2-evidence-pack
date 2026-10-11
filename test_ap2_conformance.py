@@ -27,7 +27,7 @@ class TestAp2ConformanceVectors(unittest.TestCase):
         r = rc.run()
         self.assertTrue(r["conformant"], r)
         statuses = {x["vector"]: x["status"] for x in r["results"]}
-        self.assertEqual(len(statuses), 17, statuses)   # 1.1.0: + anchor_valid (real token, probe TSA) and anchor_wrong_digest; 1.4.0: + 9 closed-schema vectors (SPEC §9)
+        self.assertEqual(len(statuses), 26, statuses)   # 1.1.0: + anchor_valid (real token, probe TSA) and anchor_wrong_digest; 1.4.0: + 9 closed-schema vectors (SPEC §9); 1.5.0: + 9 anchors vectors (SPEC §3.3)
         self.assertEqual(statuses.get("kb_jwt_valid"), "PASS", statuses)   # 1.4.0: the KB-JWT positive control
         # the set must contain the positive control — an always-reject verifier must fail
         self.assertEqual(statuses.get("valid_signed"), "PASS", statuses)
@@ -349,17 +349,19 @@ class TestAp2ConformanceVectors(unittest.TestCase):
         probe = subprocess.run(["node", "-e", "const{createPublicKey}=require('node:crypto');try{createPublicKey({key:Buffer.concat([Buffer.from('308207b2300b0609608648016503040312038207a100','hex'),Buffer.alloc(1952)]),format:'der',type:'spki'});console.log('yes')}catch{console.log('no')}"], capture_output=True, text=True)
         if probe.stdout.strip() != "yes":   # r2: on a Node build without ML-DSA-65 (OpenSSL < 3.5) the ML-DSA vectors are SKIP in the JS verifier, so 8/8 is NOT measured — skip, never a pass
             self.skipTest("Node build without ML-DSA-65 (OpenSSL < 3.5): JS conformance on the ML-DSA vectors not measured here")
-        def js_verify(path, trusted_producer_keys=None, require_pq=False, require_producer=False, require_anchor=False, **_):
+        def js_verify(path, trusted_producer_keys=None, require_pq=False, require_producer=False, require_anchor=False, min_anchors=None):   # no **_: an option nobody passes on is an error, not silence (1.5.0)
             flags = []
             for alg, keys in (trusted_producer_keys or {}).items():
                 for k in ([keys] if isinstance(keys, str) else keys): flags += ["--trusted-producer-key", f"{alg}={k}"]
             for flag, on in (("--require-producer", require_producer), ("--require-pq", require_pq), ("--require-anchor", require_anchor)):
                 if on: flags.append(flag)
+            if min_anchors is not None:
+                flags += ["--min-anchors", str(min_anchors)]
             out = subprocess.run(["node", os.path.join(_HERE, "verifiers", "js", "ap2-verify.mjs"), path] + flags, capture_output=True, text=True)
             return json.loads(out.stdout)
         r = rc.run(verify_fn=js_verify)
         self.assertTrue(r["conformant"], r)
-        self.assertEqual(len(r["results"]), 17)
+        self.assertEqual(len(r["results"]), 26)   # 1.5.0: + 9 anchors vectors
 
 
 

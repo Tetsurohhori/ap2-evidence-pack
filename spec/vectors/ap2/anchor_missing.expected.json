@@ -1,6 +1,7 @@
 {
  "description": "The valid signed pack under a policy that REQUIRES a proven time anchor: with no RFC 3161 token the existed-by claim is unproven, so the policy rejects. Same bytes as valid_signed — only the policy differs; 'claimed' never upgrades to 'proven'.",
  "normative": {
+  "anchors_verified": 0,
   "bindings_ok": true,
   "digest_ok": true,
   "policy_ok": false,

@@ -1,5 +1,57 @@
 # Changelog
 
+## 1.5.0 — 2026-10-11 — more than one time anchor: `anchors` (SPEC §3.3)
+
+**Why.** One RFC 3161 token depends on one TSA key, which ages. Measured on 1.3.0 and stated in the AP2 #338 discussion:
+the format could not carry a second commitment to the same digest — a new top-level key changes the digest, and inside
+`rfc3161_timestamp` it was silently ignored (1.3.0) or refused (1.4.x).
+
+**The rule, written first (SPEC §3.3, §9.1, revision 1.5.0).** `anchors` is an optional, non-empty top-level list OUTSIDE the
+digest (§3 now excludes four keys; no 1.0–1.4 pack carries it, so no earlier digest changes). Each entry is a closed object
+naming its `mechanism`; this revision defines `rfc3161` (`tsr_b64`, `tsa_url`, `note`). An undefined mechanism, an unknown
+key or an empty list is a refusal that names it. Every entry is checked like the `rfc3161_timestamp` token; a failing one
+fails the pack. `anchors_verified` — the number of DISTINCT anchors that verify (and, under `--tsa-cert`, are
+TSA-verified), the block's token included — is a twelfth normative field; `min_anchors` / `--min-anchors N` is the
+relying party's policy (`require_anchor` alone is 1). `rfc3161_claimed`/`rfc3161_verified` aggregate over the block and the
+entries; on a pack without `anchors` both are what 1.4.x reports. The x5c chain is validated at the EARLIEST `gen_time`
+among the TSA-verified anchors. Declared: two tokens of the same TSA count as two anchors (they share its key).
+
+**Both verifiers** (`ap2_evidence.py`, `verifiers/js/ap2-verify.mjs`): the rule above, the same refusal texts, `anchors`
+(one result per entry) and `anchors_verified` in the receipt, `--min-anchors` with one grammar (ASCII digits, ≥ 1).
+The JS verifier cannot verify a TSA signature (no openssl), so under `--tsa-cert` it counts no anchor — declared, as for
+`rfc3161_timestamp` since 1.1.0.
+
+**Builder.** `build --tsa` may repeat (the first TSA stays in `rfc3161_timestamp`, so a pack built with one TSA is still read
+by 1.4.x; the others go to `anchors`; one that gives no token is reported in the result and not written).
+`stamp <pack> --tsa URL` / `add_anchor()` adds an anchor to an existing pack after checking that the sealed content matches
+its digest; the digest and the producer signatures do not change; the file is written atomically, or not at all.
+
+**Vectors** (`make_vectors_anchors.py`, a second probe TSA whose certificate ships as `anchor_probe_tsa2.crt`): two ACCEPTs
+(`anchors_two_valid`, `anchors_only`) and seven REJECTs (`anchors_copied_token`, `anchors_min_not_met`,
+`anchors_entry_garbage`, `anchors_entry_wrong_digest`, `anchors_unknown_mechanism`, `anchors_unknown_key`,
+`anchors_empty`); 26 vectors, conformant 26/26 in both verifiers. Every `expected.json` carries `anchors_verified`. The
+three refusals carry `report.refused`, the exact text: the 1.4.1 verifiers refuse these packs too, for another reason
+(`top level: unknown key "anchors"`), and a normative block of `valid: false` alone would have let that pass.
+
+**Measured 2026-10-11.** Differential oracle 169 cases, 0 disagreements, 6 declared (the two new ones: `anchors_two_valid`
+under `--tsa-cert`, which only the reference checks); it now also compares `anchors_verified`, each anchor's facts and the
+refusal text where §9.1/§3.3 fix it (elsewhere the two verifiers word parse refusals differently, same verdict — 9 files).
+`schema_mutants.py --full`: 16 503 mutations from 37 sources, each with its SPEC class in both verifiers, 0 disagreements on
+16 540 files; against the 1.4.1 verifiers the same corpus leaves 788 (Python) and 689 (JS) mutations without their class.
+Nine mutants of the new code (a copied token counted twice, a failing anchor ignored, an unknown mechanism skipped,
+`anchors` inside the digest, `min_anchors` ignored, an empty list accepted, an unknown entry key accepted, the block's token
+not counted, `--tsa-cert` ignored in the count): 9/9 killed. `sdk_crosscheck.py --hostile` against the AP2 SDK at
+`e1ea56db72a6`: 154 artifacts, 0 disagreements. `test_ap2_anchors.py` (9 tests) runs `stamp` and `build --tsa` against a
+real local TSA (openssl `ts -reply`) and the `--min-anchors` grammar in both verifiers.
+
+**Fixed on the way.** `schema_mutants.py` and the oracle recomputed the digest over a hard-coded list of three excluded keys
+(now the SPEC's four); the JS conformance test passed its options through `**_`, which would have swallowed `min_anchors`
+silently (now explicit); `run_ap2_conformance.py` read `report.ignored` without checking that it was there.
+
+**Not covered.** Only `rfc3161` is defined: an OpenTimestamps proof or an RFC 4998 renewal chain would be a new revision.
+The "earliest TSA-verified `gen_time`" rule for x5c validation is not pinned by a vector (it needs a chained x5c and two
+TSAs). A pack that carries `anchors` is refused by every 1.4.x verifier.
+
 ## 1.4.1 — 2026-10-11 — a signature entry's FAIL names the key; the same key named in both verifiers
 
 **What 1.4.0 said and did not do (measured 2026-10-11 on the 1.4.0 release).** The 1.4.0 entry below said that a key

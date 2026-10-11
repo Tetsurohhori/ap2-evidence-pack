@@ -1,0 +1,22 @@
+{
+ "description": "anchor_valid plus an rfc3161 entry carrying a key nobody defined: the entry is a closed object, so this is a refusal naming the key (SPEC §9.1).",
+ "normative": {
+  "anchors_verified": 0,
+  "bindings_ok": false,
+  "digest_ok": false,
+  "policy_ok": false,
+  "pq_protected": false,
+  "producer_ok": null,
+  "producer_present": false,
+  "producer_trusted": null,
+  "rfc3161_claimed": false,
+  "rfc3161_verified": null,
+  "self_asserted_only": true,
+  "valid": false
+ },
+ "policy": {},
+ "report": {
+  "refused": "anchors[0]: unknown key \"x_unknown_2026\" (SPEC §9.1)"
+ },
+ "vector": "anchors_unknown_key"
+}
