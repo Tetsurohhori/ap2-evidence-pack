@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.1 — 2026-10-12 — the JS receipt reaches a pipe whole
+
+The JS verifier called `process.exit()` right after printing the receipt. On a pipe, Node drops what it has not yet
+written: an evidence file with a 100 000-character unknown key gave 65 536 bytes of broken JSON on `node ap2-verify.mjs
+… | cat` (measured on 1.5.0; the receipt is 100 477 bytes). It now sets `process.exitCode` and returns, so the receipt
+is written whole; the exit codes are unchanged. `test_js_receipt_pipe.py` reads the receipt through a real pipe and
+fails on 1.5.0. Verdicts, vectors and digests are unchanged; the Python reference was not affected.
+
 ## 1.5.0 — 2026-10-11 — more than one time anchor: `anchors` (SPEC §3.3)
 
 **Text corrected after the release (2026-10-11, no code change).** The README and the `add_anchor` docstring said `stamp` adds "a
