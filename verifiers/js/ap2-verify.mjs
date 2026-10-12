@@ -422,6 +422,6 @@ function main(argv) {
   if (!path) usage();
   const r = verifyEvidence(path, opts); console.log(JSON.stringify(r, null, 1)); return r.valid ? 0 : 1;
 }
-// exitCode, not process.exit(): exit() right after console.log to a PIPE drops every byte past 64 KiB of the receipt
+// exitCode, not process.exit(): exit() right after console.log to a PIPE drops every byte of the receipt past the pipe buffer (64 KiB on Linux)
 // (measured 12/10/2026: an evidence file with a 100 000-character unknown key gave 65 536 bytes of broken JSON on `| cat`)
 if (process.argv[1] && /ap2-verify\.mjs$/.test(process.argv[1])) process.exitCode = main(process.argv);

@@ -397,7 +397,7 @@ any legal or regulatory proceeding.
 ## Versioning
 
 Within 1.x these do not change: `build_evidence(artifacts, out_path)`, `verify_evidence(path)` → dict with `valid` and,
-when false, `refused`; the CLI `ap2-evidence build|verify` (1.5.0 adds `stamp`) and its exit codes (0 valid, 1 otherwise). Wheel layout,
+when false, `refused`; the CLI `ap2-evidence build|verify` (1.5.0 adds `stamp`) and its exit codes (0 valid or done, 1 not valid or refused, 2 a usage error). Wheel layout,
 dependency floors and new refusals may change in a minor release and the changelog says so. A change to the three above
 is 2.0.
 

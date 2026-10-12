@@ -4,9 +4,18 @@
 
 The JS verifier called `process.exit()` right after printing the receipt. On a pipe, Node drops what it has not yet
 written: an evidence file with a 100 000-character unknown key gave 65 536 bytes of broken JSON on `node ap2-verify.mjs
-… | cat` (measured on 1.5.0; the receipt is 100 477 bytes). It now sets `process.exitCode` and returns, so the receipt
-is written whole; the exit codes are unchanged. `test_js_receipt_pipe.py` reads the receipt through a real pipe and
-fails on 1.5.0. Verdicts, vectors and digests are unchanged; the Python reference was not affected.
+… | cat` (measured on 1.5.0, Linux, whose pipe buffer is 64 KiB; the receipt is 100 477 bytes), and a valid pack whose
+receipt passed 64 KiB exited 0 with a receipt cut the same way. It now sets `process.exitCode` and returns, so the receipt
+is written whole; the exit codes are unchanged (0 valid, 1 not valid, 2 usage). `test_js_receipt_pipe.py` writes the
+receipt into a real pipe whose reader starts late and reads the verifier's own exit code: an invalid and a valid receipt
+over 64 KiB, two small ones and two usage errors. It fails on 1.5.0, and on each of eight mutants of the changed line (the
+exit code left at 0, forced to 0 or 1, inverted; `process.exit()` restored, or called after the assignment, on the next
+tick or on `setImmediate`). Verdicts, vectors and digests are unchanged; the Python reference was not affected. The JS
+verifier is not in the wheel or the sdist: the Python code they ship differs from 1.5.0 only in the `add_anchor`
+docstring corrected after the 1.5.0 release.
+
+**Text corrected.** The README's versioning paragraph gave the CLI exit codes as "0 valid, 1 otherwise"; a usage error
+exits 2, in both verifiers (the Python CLI already did in 1.0.0).
 
 ## 1.5.0 — 2026-10-11 — more than one time anchor: `anchors` (SPEC §3.3)
 
