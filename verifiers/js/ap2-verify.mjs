@@ -6,7 +6,7 @@
 // Acceptance profile of the file (SPEC §3.1): strict UTF-8, no BOM, no duplicate keys, no floats, integers within
 // +/-(2^53-1), nesting <= 512, no lone surrogate escape, 64 MiB bound. A refused file is a receipt with valid=false.
 // Usage: ap2-verify.mjs <evidence.json> [--trusted-producer-key ALG=B64]... [--require-producer] [--require-pq] [--require-anchor] [--min-anchors N] [--tsa-cert PEM] [--trust-anchor PEM]
-import { statSync, openSync, fstatSync, readSync, closeSync, constants as FS } from "node:fs";
+import { statSync, openSync, fstatSync, readSync, closeSync, writeSync, constants as FS } from "node:fs";
 import { createHash, createPublicKey, verify as cryptoVerify, X509Certificate } from "node:crypto";
 
 const MAX_DEPTH = 512, MAX_BYTES = 64 * 1024 * 1024, SAFE = 2 ** 53 - 1;
@@ -409,7 +409,8 @@ export function verifyEvidence(path, opts = {}) {
     valid: Boolean(artResults.length && digestOk && allOk && bindingsOk && rfc.verified !== false && policyOk), honest_scope: ev.honest_scope ?? null, mldsa_backend: HAVE_MLDSA };
 }
 function main(argv) {
-  const usage = () => { console.error("usage: ap2-verify.mjs <evidence.json> [--trusted-producer-key ALG=B64]... [--require-producer] [--require-pq] [--require-anchor] [--min-anchors N] [--tsa-cert PEM] [--trust-anchor PEM]"); process.exit(2); };
+  // 1.5.2 review: a usage line that stderr does not take (/dev/full) is 74, as in the Python CLI (console.error dropped the error and exited 2)
+  const usage = () => { try { writeSync(2, "usage: ap2-verify.mjs <evidence.json> [--trusted-producer-key ALG=B64]... [--require-producer] [--require-pq] [--require-anchor] [--min-anchors N] [--tsa-cert PEM] [--trust-anchor PEM]\n"); } catch { process.exit(EX_IOERR); } process.exit(2); };
   const a = argv.slice(2); const opts = { trusted: null }; let path = null;
   for (let i = 0; i < a.length; i++) { let tok = a[i], eqv = null; const eq = tok.indexOf("="); if (eq > 0 && tok.startsWith("--")) { eqv = tok.slice(eq + 1); tok = tok.slice(0, eq); }
     const nx = () => { const v = eqv !== null ? eqv : a[++i]; if (v === undefined || v === "" || v.startsWith("-")) usage(); return v; };
@@ -420,8 +421,40 @@ function main(argv) {
     else if (tok === "--require-producer" && eqv === null) opts.requireProducer = true; else if (tok === "--require-pq" && eqv === null) opts.requirePq = true; else if (tok === "--require-anchor" && eqv === null) opts.requireAnchor = true;
     else if (tok.startsWith("-") || path !== null) usage(); else path = tok; }
   if (!path) usage();
-  const r = verifyEvidence(path, opts); console.log(JSON.stringify(r, null, 1)); return r.valid ? 0 : 1;
+  const r = verifyEvidence(path, opts); emit(JSON.stringify(r, null, 1), r.valid ? 0 : 1);
 }
 // exitCode, not process.exit(): exit() right after console.log to a PIPE drops every byte of the receipt past the pipe buffer (64 KiB on Linux)
-// (measured 12/10/2026: an evidence file with a 100 000-character unknown key gave 65 536 bytes of broken JSON on `| cat`)
-if (process.argv[1] && /ap2-verify\.mjs$/.test(process.argv[1])) process.exitCode = main(process.argv);
+// (measured 12/10/2026: an evidence file with a 100 000-character unknown key gave 65 536 bytes of broken JSON on `| cat`).
+// 1.5.2: the exit code is chosen in the write's callback. console.log + exitCode left the verdict's 0/1 when the write
+// FAILED (/dev/full: ENOSPC; a reader that closed the pipe: EPIPE), with nothing on stderr (measured 12/10/2026 on 1.5.1);
+// now that is 74 (EX_IOERR) and one line on stderr. Not visible from here: with stdout closed (`>&-`) Node reopens fd 1 on
+// /dev/null, so the write succeeds.
+const EX_IOERR = 74;
+function emit(text, code) {
+  // 1.5.2 review: on a REGULAR FILE that stops growing, process.stdout.write lost the rest of the receipt with no error
+  // (measured: `ulimit -f 4`, 4 096 of 84 432 bytes, exit 0, Node 22 and 24). There the receipt is written in a loop to
+  // its last byte, and a failed write (EFBIG, ENOSPC) is 74.
+  let st = null; try { st = fstatSync(1); } catch { st = null; }
+  if (st && st.isFile()) {
+    const buf = Buffer.from(text + "\n", "utf8"); let off = 0;
+    try {
+      while (off < buf.length) off += writeSync(1, buf, off, buf.length - off);
+      process.exitCode = code;
+    } catch (err) {
+      process.exitCode = EX_IOERR;
+      try { writeSync(2, `receipt not written: ${err.code ?? err.message ?? err}\n`); } catch { /* exit 74 anyway */ }
+    }
+    return;
+  }
+  let settled = false;
+  const settle = (err) => {
+    if (settled) return; settled = true;
+    if (!err) { process.exitCode = code; return; }
+    process.exitCode = EX_IOERR;
+    try { process.stderr.write(`receipt not written: ${err.code ?? err.message ?? err}\n`); } catch { /* exit 74 anyway */ }
+  };
+  process.stderr.on("error", () => {});   // a failing stderr must not turn 74 into an uncaught exception
+  process.stdout.on("error", settle);
+  try { process.stdout.write(text + "\n", settle); } catch (e) { settle(e); }
+}
+if (process.argv[1] && /ap2-verify\.mjs$/.test(process.argv[1])) main(process.argv);

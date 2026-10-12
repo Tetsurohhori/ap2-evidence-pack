@@ -1,5 +1,59 @@
 # Changelog
 
+## 1.5.2 — 2026-10-12 — a receipt that was not written is exit 74
+
+Both CLIs computed the outcome, wrote the receipt to stdout and exited with the verdict's code without checking that the
+write had succeeded. Measured on 1.5.1 (Linux, Python 3.11, Node 22), `verify` on a valid and on a refused pack, stdout on
+`/dev/full`, on a pipe whose reader has gone (`| head -c 0`) and closed (`>&-`): the JS verifier exited 0 and 1 on
+`/dev/full` and on the pipe with nothing on stderr; the Python CLI exited 120 there (the interpreter's own final flush,
+"Exception ignored …", a code no contract named) and with stdout closed exited 0 and 1 with nothing on stderr, as did
+`build` and `stamp` (0). A Python receipt larger than the stream buffer failed inside `print()` instead: a traceback and
+exit 1, the "not valid" code, also for a valid pack (an 84 620-byte valid receipt on `/dev/full` and on the closed pipe).
+With stderr on `/dev/full`, a usage error and a refusal of `build` or `stamp` exited 120 in the Python CLI (2 with the
+usage line lost in the JS verifier); with stderr closed (`2>&-`) the Python refusal and usage text went to stdout (exit 1
+for the refusal, 1 or 2 for usage depending on the Python version and the path). With stdout on a regular file that
+stops growing (`ulimit -f 4`), the JS verifier wrote 4 096 bytes of an 84 432-byte receipt and exited 0 (Node 22 and 24,
+no error reported); the Python CLI exited 1 with a traceback. `build` into a pack path it could not write raised a traceback and exited 1, the "not valid" code;
+`stamp` into a directory it could not write exited 1 with its refusal.
+
+Now the receipt is written and flushed before the exit code is chosen (Python: an explicit flush inside `try`; Node: the
+code is set in the write's callback and its `error` event, not after `console.log`). When the receipt does not reach
+stdout whole, or `build` / `stamp` cannot write the pack, the exit is 74 (EX_IOERR in sysexits.h) whatever the outcome,
+with one line `receipt not written: <reason>` on stderr; if stderr fails too, the exit is still 74. A refusal (1) or a
+usage message (2) that stderr does not take is 74 as well, and stdout stays empty; the JS verifier writes its usage line
+with a checked synchronous write for the same reason, and writes a receipt to a regular file in a loop to its last byte
+(a failed write, `EFBIG` or `ENOSPC`, is 74). Bytes a pipe has taken count as written: a reader that closes after
+that (`| head -c 100` on a small receipt) is not seen.
+After a `stamp` that exits 74, `cannot write the stamped pack … not stamped` leaves the pack unchanged (it is written
+atomically, as before); any other reason means the pack holds the new anchor and only the receipt was lost. A `build`
+that cannot write the pack may leave a partly written file behind, an earlier pack at that path included when the failure comes after the path
+was opened (a 5 891-byte pack left at 2 048 bytes under `ulimit -f 2`, no longer valid), as in 1.5.1. A refusal of `build` or `stamp`
+goes to stderr and stdout stays empty, so with a working stderr it is still 1 in every stdout mode. Exit codes 0, 1 and 2
+keep their meaning; the 1.5.1 entry below says "the exit codes are unchanged" about 1.5.1. The versioning rule reserves a
+change of exit codes for 2.0: 74 is the one exception, made here and named in the README's Versioning section.
+
+One limit of the runtime, not of this code: with stdout or stderr closed (`>&-`, `2>&-`) Node reopens the descriptor on
+`/dev/null`, so the JS verifier's write succeeds and it exits with the verdict's 0/1 (2 for usage); the Python CLI exits 74
+there.
+
+`test_receipt_not_written.py` runs both CLIs in child processes with a real file descriptor: a regular file (the
+control: verdict code and receipt byte for byte), `/dev/full`, a pipe whose read end is closed before the child starts,
+fd 1 closed before exec, the same with stderr on `/dev/full` or closed, a pack path that cannot be written, a directory
+`stamp` cannot write (a local RFC 3161 TSA built with openssl), a Python receipt over 64 KiB through a slow reader, usage
+errors and refusals with stderr on `/dev/full` or closed, a valid receipt of 84 KB into a file limited to 4 096 bytes
+(`RLIMIT_FSIZE`), and `Ap2WriteError` being both an `Ap2EvidenceError` and an `OSError`. Run against the 1.5.1 files,
+unittest reports 44 failures (subtests included, one of them an error) in 13 of its 23 tests; on 1.5.2 none.
+`test_js_receipt_pipe.py` (1.5.1, receipts over 64 KiB through a pipe) is unchanged and passes.
+One existing test changes with the code: `test_ap2_anchors.py` expected exit 1 for `stamp` into a directory it
+cannot write and now expects 74 (still "not stamped" on stderr, no traceback). Receipts, verdicts, vectors and digests are unchanged. `Ap2WriteError`, raised by
+`build_evidence` and `add_anchor` when the pack cannot be written, is both an `Ap2EvidenceError` and an `OSError`
+(`build_evidence` raised an `OSError` there before; `add_anchor` an `Ap2EvidenceError`). Of 22 mutants of the changed
+lines (flush removed, write error swallowed, exit with the verdict, `stdout is None` unchecked, the buffered bytes or a
+failing stderr left to the interpreter's exit, 74 replaced by 1, the pack write error turned back into a refusal or a
+traceback, the stderr line dropped, the JS callback or `error` listeners removed, `process.exit()` after the write) the
+two suites kill 21. The survivor drops the JS write callback but keeps the `error` listener: Node reports a failed write
+through both, so it behaves the same in every mode measured; with neither, the mutant is killed.
+
 ## 1.5.1 — 2026-10-12 — the JS receipt reaches a pipe whole
 
 The JS verifier called `process.exit()` right after printing the receipt. On a pipe, Node drops what it has not yet

@@ -103,6 +103,11 @@ class Ap2EvidenceError(ValueError):
     """Fail-closed parse/verify error (message is auditor-readable, never a traceback)."""
 
 
+class Ap2WriteError(Ap2EvidenceError, OSError):
+    """1.5.2 — the output file (the pack `build` writes, the pack `stamp` rewrites) could not be written. Also an OSError,
+    which is what `build_evidence` raised there before. The CLI exits 74 (EX_IOERR) on it, whatever the outcome was."""
+
+
 # ────────────────────────────────────────────────────────── b64url / hashing
 
 def _no_dup_pairs(pairs):
@@ -1026,8 +1031,11 @@ def build_evidence(artifacts: List[Dict], out_path: str,
             failed.append({"tsa_url": u, "note": st.get("note")})
     if added:
         evidence["anchors"] = added
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(evidence, f, ensure_ascii=False, indent=1, sort_keys=True)
+    try:   # 1.5.2: a pack that cannot be written is EX_IOERR in the CLI, not a traceback (exit 1, the "not valid" code)
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(evidence, f, ensure_ascii=False, indent=1, sort_keys=True)
+    except OSError as e:
+        raise Ap2WriteError(f"cannot write the pack {out_path!r}: {type(e).__name__}: {e.strerror or e}") from e
     return {"out": out_path, "artifacts": len(entries),
             "bindings": len(evidence["bindings"]),
             "evidence_digest_sha256": evidence["evidence_digest_sha256"],
@@ -1075,7 +1083,7 @@ def add_anchor(path: str, tsa_url: str) -> Dict:
                 f.flush(); os.fsync(f.fileno())
             os.replace(tmp, path); tmp = None
         except OSError as e:
-            raise Ap2EvidenceError(f"cannot write the stamped pack: {type(e).__name__}: not stamped") from e
+            raise Ap2WriteError(f"cannot write the stamped pack: {type(e).__name__}: not stamped") from e
         finally:
             if tmp is not None:
                 try:
@@ -1356,8 +1364,123 @@ def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = Fa
 
 # ────────────────────────────────────────────────────────── CLI
 
+EX_IOERR = 74   # 1.5.2 — sysexits.h: the outcome was computed but its receipt (or the output file) was not written whole
+
+
+def _to_devnull(stream) -> None:
+    """The bytes still buffered in a stream whose write failed must not fail again at interpreter exit: that exit is 120
+    with an "Exception ignored" message, not ours. fd -> /dev/null, so the final flush succeeds and discards them."""
+    try:
+        null = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(null, stream.fileno())
+        os.close(null)
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
+def _emit(text: str) -> Optional[str]:
+    """Write the receipt to stdout and FLUSH it here, before the exit code is chosen. Returns None when every byte was
+    handed to the OS, else the reason. Before 1.5.2 the receipt went through print(): on /dev/full or a closed pipe a
+    receipt that fit the stream buffer failed at the interpreter's final flush (exit 120, "Exception ignored"), a larger
+    one failed inside print() (a traceback, exit 1, also for a valid pack: 84 620 bytes measured), and with stdout closed
+    (`>&-`, sys.stdout is None) print() did nothing and the exit was the verdict's 0/1 (measured 2026-10-12 on 1.5.1)."""
+    out = sys.stdout
+    if out is None:
+        return "stdout is closed"
+    try:
+        out.write(text + "\n")
+        out.flush()
+        return None
+    except (OSError, ValueError) as e:   # ENOSPC, EPIPE, EBADF; ValueError: write to a closed file object
+        _to_devnull(out)
+        return f"{type(e).__name__}: {e}"
+
+
+def _not_written(reason: str) -> int:
+    """One line on stderr, if stderr can take it; the exit is EX_IOERR either way."""
+    try:
+        if sys.stderr is not None:
+            sys.stderr.write(f"receipt not written: {reason}\n")
+            sys.stderr.flush()
+    except (OSError, ValueError):
+        _to_devnull(sys.stderr)
+    return EX_IOERR
+
+
+def _refused(msg: str) -> int:
+    """A refusal of `build` / `stamp`: one `{"error": ...}` line on stderr, exit 1; never on stdout. When that line cannot
+    be written (stderr on /dev/full, or closed) the exit is EX_IOERR, as for a lost receipt (1.5.2 review: before, stderr
+    full gave the interpreter's 120 and stderr closed sent the refusal to stdout)."""
+    err = sys.stderr
+    try:
+        err.write(json.dumps({"error": msg}) + "\n")
+        err.flush()
+        return 1   # a closed stderr (_ClosedStderr) turns this into EX_IOERR in main()
+    except (OSError, ValueError):
+        _to_devnull(err)
+        return EX_IOERR
+
+
+class _ClosedStderr:
+    """sys.stderr while fd 2 is closed (sys.stderr is None): what would have gone there is counted, never sent to stdout
+    (argparse prints its usage to stdout when sys.stderr is None)."""
+    lost = False
+
+    def write(self, s):
+        if s:
+            self.lost = True
+        return len(s)
+
+    def flush(self):
+        pass
+
+
+class _Parser(argparse.ArgumentParser):
+    """argparse up to 3.12 lets the OSError of a usage message written to a full stderr escape (a traceback, then 120);
+    3.13 swallows it. Here the failed write is recorded and the exit becomes EX_IOERR in every version."""
+    stderr_lost = False
+
+    def _print_message(self, message, file=None):
+        if not message:
+            return
+        file = sys.stderr if file is None else file
+        try:
+            file.write(message)
+        except (OSError, ValueError):
+            _Parser.stderr_lost = True
+            _to_devnull(file)
+
+
+def _stderr_settled(rc: int) -> int:
+    """The exit code once stderr is flushed: EX_IOERR when a message meant for stderr (usage, refusal, the "receipt not
+    written" line) did not get there, so a full or closed stderr never gives the interpreter's 120 or a traceback."""
+    err = sys.stderr
+    if getattr(err, "lost", False) or _Parser.stderr_lost:
+        return EX_IOERR
+    try:
+        if err is not None:
+            err.flush()
+        return rc
+    except (OSError, ValueError):
+        _to_devnull(err)
+        return EX_IOERR
+
+
 def main(argv: Optional[List[str]] = None) -> int:
-    p = argparse.ArgumentParser(prog="ap2-evidence-pack", allow_abbrev=False, add_help=False,
+    if sys.stderr is None:
+        sys.stderr = _ClosedStderr()
+    _Parser.stderr_lost = False
+    try:
+        rc = _main(argv)
+    except SystemExit as e:   # argparse usage errors (2)
+        if not isinstance(e.code, int):
+            raise
+        raise SystemExit(_stderr_settled(e.code)) from None
+    return _stderr_settled(rc)
+
+
+def _main(argv: Optional[List[str]] = None) -> int:
+    p = _Parser(prog="ap2-evidence-pack", allow_abbrev=False, add_help=False,
                                 description="Self-contained, offline-verifiable dispute "
                                             "evidence for agentic-payment SD-JWT mandates")
     sub = p.add_subparsers(dest="cmd")
@@ -1431,24 +1554,28 @@ def main(argv: Optional[List[str]] = None) -> int:
             keys[name] = _read("--key", path, as_json=True)
         jwks = dict(_pair("--jwks-url", s) for s in a.jwks_url)
         try:
-            print(json.dumps(build_evidence(arts, a.out, keys=keys, jwks_urls=jwks,
-                                            tsa_url=(a.tsa[0] if a.tsa else None), subject=a.subject,
-                                            extra_tsa_urls=a.tsa[1:]), indent=1))
-            return 0
+            res = build_evidence(arts, a.out, keys=keys, jwks_urls=jwks,
+                                 tsa_url=(a.tsa[0] if a.tsa else None), subject=a.subject,
+                                 extra_tsa_urls=a.tsa[1:])
+        except Ap2WriteError as e:
+            return _not_written(str(e))
         except Ap2EvidenceError as e:
-            print(json.dumps({"error": str(e)}), file=sys.stderr)
-            return 1
+            return _refused(str(e))
+        why = _emit(json.dumps(res, indent=1))
+        return 0 if why is None else _not_written(why)
     if a.cmd == "stamp":
         if a.evidence == "" or a.evidence.startswith("-"):
             p.error(f"evidence path needs a value (got {a.evidence!r})")
         if len(a.tsa) != 1:   # measured on b3edfc8: `--tsa A --tsa B` stamped B only, exit 0, A dropped in silence
             p.error(f"stamp takes exactly one --tsa (got {len(a.tsa)}): run it once per TSA")
         try:
-            print(json.dumps(add_anchor(a.evidence, a.tsa[0]), indent=1))
-            return 0
+            res = add_anchor(a.evidence, a.tsa[0])
+        except Ap2WriteError as e:
+            return _not_written(str(e))
         except Ap2EvidenceError as e:
-            print(json.dumps({"error": str(e)}), file=sys.stderr)
-            return 1
+            return _refused(str(e))
+        why = _emit(json.dumps(res, indent=1))
+        return 0 if why is None else _not_written(why)
     if a.cmd == "verify":
         if a.evidence == "" or a.evidence.startswith("-"):
             p.error(f"evidence path needs a value (got {a.evidence!r})")
@@ -1468,7 +1595,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         r = verify_evidence(a.evidence, trusted_producer_keys=trusted, require_pq=a.require_pq,
                             require_producer=a.require_producer, require_anchor=a.require_anchor, tsa_cert=a.tsa_cert,
                             trust_anchor=a.trust_anchor, min_anchors=min_anchors)
-        print(json.dumps(r, indent=1))
+        why = _emit(json.dumps(r, indent=1))
+        if why is not None:   # 1.5.2: never the verdict's 0/1 when the receipt did not reach stdout whole
+            return _not_written(why)
         return 0 if r["valid"] else 1
     p.print_help(sys.stderr)   # r3: usage goes to stderr, no verdict on stdout — as every other usage path and the JS verifier
     return 2

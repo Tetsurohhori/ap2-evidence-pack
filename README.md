@@ -47,11 +47,23 @@ python3 ap2_evidence.py build evidence.json checkout=checkout.sdjwt payment=paym
         [--key name=jwk.json] [--jwks-url name=https://...] [--tsa http://tsa.example]...   # 1.5.0: --tsa may repeat
 python3 ap2_evidence.py stamp evidence.json --tsa http://tsa2.example   # 1.5.0: add one more time anchor to an existing pack
 
-python3 ap2_evidence.py verify evidence.json     # offline, fail-closed; exit 0/1
+python3 ap2_evidence.py verify evidence.json     # offline, fail-closed; exit 0/1 (74: receipt not written, 1.5.2)
 python3 ap2_evidence.py verify evidence.json --trusted-producer-key ed25519=<b64> --trusted-producer-key ml-dsa-65=<b64> --require-pq --require-anchor   # relying-party policy (1.1.0)
 python3 ap2_evidence.py verify evidence.json --min-anchors 2 --tsa-cert tsa-bundle.pem   # 1.5.0: two distinct anchors, each TSA-verified
-node verifiers/js/ap2-verify.mjs evidence.json   # the independent verifier, same flags
+node verifiers/js/ap2-verify.mjs evidence.json   # the independent verifier, same flags and exit codes (limits below)
 ```
+
+Exit 74 (1.5.2): when the receipt cannot be written whole to stdout (`/dev/full`, a file that cannot grow under
+`ulimit -f`, a reader that closed the pipe before the receipt was in it, stdout closed with `>&-`), `build`, `stamp` and `verify` exit 74 whatever the outcome, with one line
+`receipt not written: <reason>` on stderr; `build` and `stamp` do the same when they cannot write the pack itself. Bytes the
+pipe has taken count as written: a reader that closes later (`| head -c 100` on a small receipt) is not seen. A refusal
+(1) or a usage message (2) that stderr does not take (`2>/dev/full`, `2>&-`) is 74 too, and nothing goes to stdout. After a
+`stamp` that exits 74, the stderr line says which: `cannot write the stamped pack … not stamped` leaves the pack unchanged,
+any other reason means the pack holds the new anchor and only the receipt was lost (verify the pack before stamping again).
+A `build` that fails after opening the pack path (a full disk, `ulimit -f`) leaves a partly written file there, an earlier
+pack at that path included: build into a new path.
+What the JS verifier cannot see: with stdout or stderr closed (`>&-`, `2>&-`) Node reopens the descriptor on `/dev/null`
+and the write succeeds, so the exit is the verdict's 0/1 (2 for usage); the Python CLI exits 74 there.
 
 Or as a library: `build_evidence(...)` / `verify_evidence(...)`.
 
@@ -399,7 +411,9 @@ any legal or regulatory proceeding.
 Within 1.x these do not change: `build_evidence(artifacts, out_path)`, `verify_evidence(path)` → dict with `valid` and,
 when false, `refused`; the CLI `ap2-evidence build|verify` (1.5.0 adds `stamp`) and its exit codes (0 valid or done, 1 not valid or refused, 2 a usage error). Wheel layout,
 dependency floors and new refusals may change in a minor release and the changelog says so. A change to the three above
-is 2.0.
+is 2.0, with one exception, made in 1.5.2 and limited to it: exit 74 when the receipt, the pack, a refusal or a usage
+message could not be written whole. 1.5.1 exited there with 120, with 1 and a traceback (a valid pack included), with 1
+as a refusal (`stamp`), or with the verdict's 0/1 or the usage 2 while the output was lost or went to stdout.
 
 cryptovalid-opencore >= 0.18.0 depends on this package (its `ap2` extra) and ships no copy of it; the
 `downstream-cryptovalid` CI job runs its AP2 suites against the wheel built from every change here (first run green on

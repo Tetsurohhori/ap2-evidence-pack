@@ -464,11 +464,12 @@ class TestStampWrite(unittest.TestCase):
         self.assertEqual([f["tsa_url"] for f in json.loads(out)["anchors_failed"]], ["https://down"])
 
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root writes into a read-only directory")
-    def test_an_unwritable_directory_is_a_refusal_not_a_traceback(self):
+    def test_an_unwritable_directory_is_exit_74_not_a_traceback(self):
+        # 1.5.2: the pack that cannot be written is EX_IOERR (74), no longer the refusal code 1 (CHANGELOG 1.5.2)
         ro = os.path.join(self.d, "ro"); os.makedirs(ro); p = os.path.join(ro, "p.json"); shutil.copy(self.pack, p)
         os.chmod(ro, 0o555); self.addCleanup(os.chmod, ro, 0o755)
         rc, out, err = self._cli("stamp", p, "--tsa", "https://ok1")
-        self.assertEqual(rc, 1); self.assertIn("not stamped", err)
+        self.assertEqual(rc, 74); self.assertIn("not stamped", err); self.assertNotIn("Traceback", err)
 
 
 class TestMinAnchorsApi(unittest.TestCase):
