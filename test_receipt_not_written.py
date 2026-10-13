@@ -784,6 +784,17 @@ class TestPackWrittenWholeOrNotAtAll(unittest.TestCase):
         self.assertEqual((rc, raw, hits), (74, b"", []), err)
         self.assertEqual(err, ("receipt not written: cannot write the pack %r: IsADirectoryError: Is a directory\n" % sub).encode())
 
+    def test_the_stderr_line_keeps_the_streams_error_handler(self):
+        """stderr's own error handler (backslashreplace) decides how a character it cannot encode is written: a pack path
+        with a non-ASCII character under PYTHONIOENCODING=ascii still gives the whole line, escaped as the text layer
+        escapes it, and 74 — never a line lost to a strict encoder."""
+        out = os.path.join(self.d, "no_such_d\u00fcr", "ev.json")
+        p = subprocess.run(_PY + ["build", out, "checkout=checkout.sdjwt", "payment=payment.sdjwt"], cwd=self.d,
+                           stdin=subprocess.DEVNULL, capture_output=True, env=dict(os.environ, PYTHONIOENCODING="ascii"), timeout=300)
+        self.assertEqual((p.returncode, p.stdout), (74, b""), p.stderr)
+        line = "receipt not written: cannot write the pack %r: FileNotFoundError: No such file or directory\n" % out
+        self.assertEqual(p.stderr, line.encode("ascii", "backslashreplace"))
+
     def test_sign_evidence_leaves_the_pack_as_it_was_when_it_cannot_write(self):
         sub = tempfile.mkdtemp(dir=self.d)
         out = os.path.join(sub, "ev.json")
