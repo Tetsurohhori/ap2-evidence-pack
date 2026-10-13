@@ -54,16 +54,27 @@ node verifiers/js/ap2-verify.mjs evidence.json   # the independent verifier, sam
 ```
 
 Exit 74 (1.5.2): when the receipt cannot be written whole to stdout (`/dev/full`, a file that cannot grow under
-`ulimit -f`, a reader that closed the pipe before the receipt was in it, stdout closed with `>&-`), `build`, `stamp` and `verify` exit 74 whatever the outcome, with one line
-`receipt not written: <reason>` on stderr; `build` and `stamp` do the same when they cannot write the pack itself. Bytes the
-pipe has taken count as written: a reader that closes later (`| head -c 100` on a small receipt) is not seen. A refusal
-(1) or a usage message (2) that stderr does not take (`2>/dev/full`, `2>&-`) is 74 too, and nothing goes to stdout. After a
-`stamp` that exits 74, the stderr line says which: `cannot write the stamped pack … not stamped` leaves the pack unchanged,
-any other reason means the pack holds the new anchor and only the receipt was lost (verify the pack before stamping again).
-A `build` that fails after opening the pack path (a full disk, `ulimit -f`) leaves a partly written file there, an earlier
-pack at that path included: build into a new path.
+`ulimit -f`, a reader that closed the pipe before the receipt was in it, stdout closed with `>&-`), `build`, `stamp` and
+`verify` exit 74 whatever the outcome, with one line `receipt not written: <reason>` on stderr; `build` and `stamp` do the
+same when they cannot write the pack itself. The same holds with `-u` or `PYTHONUNBUFFERED=1`. Bytes the pipe has taken
+count as written: a reader that closes later (`| head -c 100` on a small receipt) is not seen. A stdout or stderr that is
+a non-blocking pipe and full is waited for, as a blocking one would be, never reported as lost; in process, text the
+caller left in `sys.stdout`'s buffer goes first and is waited for too. A refusal (1) or a usage message (2) that stderr
+does not take (`2>/dev/full`, `2>&-`) is 74 too, and nothing goes to stdout. After a `stamp` that exits 74, the stderr
+line says which: `cannot write the stamped pack … not stamped` leaves the pack unchanged, any other reason means the pack
+holds the new anchor and only the receipt was lost (verify the pack before stamping again).
+`build` writes the pack to a new file with an unpredictable name, created exclusively in the same directory, and renames
+it onto the path only when it is whole, so a failed `build` leaves an earlier pack at that path as it was; a path that is
+not a regular file (`/dev/stdout`, a FIFO) is written directly, and an existing pack in a directory this process cannot
+write is now 74 (1.5.1 rewrote it in place). `pqcrypto.sigsuite.ProducerIdentity.save` writes the key file the same way,
+mode 0600. A check asked for that cannot be run here is 74, never 1: `verify --tsa-cert` and `--trust-anchor` when the
+files openssl reads cannot be written (`cannot write a temporary file for openssl`) or openssl cannot be started
+(`cannot run openssl here`); the library raises `Ap2WriteError`.
 What the JS verifier cannot see: with stdout or stderr closed (`>&-`, `2>&-`) Node reopens the descriptor on `/dev/null`
-and the write succeeds, so the exit is the verdict's 0/1 (2 for usage); the Python CLI exits 74 there.
+and the write succeeds, so the exit is the verdict's 0/1 (2 for usage); the Python CLI exits 74 there. In process, after
+text the caller wrote to a `utf-8-sig` pipe, the receipt carries a second byte order mark (the command line never does).
+Measured on Linux only; Windows and macOS are not measured (on Windows Python's `select` waits on sockets only, so a full
+non-blocking pipe there would be 74).
 
 Or as a library: `build_evidence(...)` / `verify_evidence(...)`.
 
@@ -412,8 +423,11 @@ Within 1.x these do not change: `build_evidence(artifacts, out_path)`, `verify_e
 when false, `refused`; the CLI `ap2-evidence build|verify` (1.5.0 adds `stamp`) and its exit codes (0 valid or done, 1 not valid or refused, 2 a usage error). Wheel layout,
 dependency floors and new refusals may change in a minor release and the changelog says so. A change to the three above
 is 2.0, with one exception, made in 1.5.2 and limited to it: exit 74 when the receipt, the pack, a refusal or a usage
-message could not be written whole. 1.5.1 exited there with 120, with 1 and a traceback (a valid pack included), with 1
-as a refusal (`stamp`), or with the verdict's 0/1 or the usage 2 while the output was lost or went to stdout.
+message could not be written whole, or when `--tsa-cert` or `--trust-anchor` could not write the temporary files openssl
+reads or could not start openssl (`verify_evidence` then raises `Ap2WriteError`). 1.5.1 exited there with 120, with 1 and
+a traceback (a valid pack included), with 1 as a refusal (`stamp`) or as "not valid" (`--tsa-cert`, `--trust-anchor`),
+with 0 and `"chain_verified": false` for a chain never checked (`--trust-anchor`, openssl not started), or with the
+verdict's 0/1 or the usage 2 while the output was lost or went to stdout.
 
 cryptovalid-opencore >= 0.18.0 depends on this package (its `ap2` extra) and ships no copy of it; the
 `downstream-cryptovalid` CI job runs its AP2 suites against the wheel built from every change here (first run green on
