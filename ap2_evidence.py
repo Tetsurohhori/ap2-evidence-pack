@@ -605,6 +605,21 @@ def _tmp_error(e: OSError) -> "Ap2WriteError":
     return Ap2WriteError(f"cannot write a temporary file for openssl: {type(e).__name__}: {why}")
 
 
+def _run_openssl(cmd: List[str], timeout: int, **kw):
+    """subprocess.run of openssl for a check the caller asked for. openssl that cannot be started HERE (fork refused under
+    `ulimit -u` or low memory: EAGAIN/ENOMEM; no descriptor left for its pipes: EMFILE; the binary gone since `which`) is
+    Ap2WriteError, the same "this check cannot be run here" as a temporary file that cannot be written: before (1.5.1 to
+    cb36d56) it was reported as a failed check — measured 13/10/2026 under RLIMIT_NPROC 1, `verify --tsa-cert
+    --require-anchor` on a valid pack: `tsa_verified: false`, `valid: false`, exit 1. A timeout is not this case: openssl
+    ran and did not answer, which the input can cause, so it stays a failed check."""
+    import subprocess
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=timeout, **kw)
+    except OSError as e:
+        why = os.strerror(e.errno) if isinstance(e.errno, int) else str(e)
+        raise Ap2WriteError(f"cannot run openssl here: {type(e).__name__}: {why}") from e
+
+
 def _tmp_write(path: str, data: bytes) -> None:
     try:
         with open(path, "wb") as f:
@@ -626,7 +641,6 @@ def _verify_x5c_chain(x5c: List[str], trust_anchor: str, at_time: Optional[str] 
     Returns True/False, or None when openssl is absent (r9: unmeasurable is not the same as failed — `self_asserted_only`
     stays fail-closed either way)."""
     import shutil
-    import subprocess
     exe = shutil.which("openssl")
     if not exe:
         return None          # r9: not measurable here, which is not the same as "the chain failed"
@@ -653,7 +667,7 @@ def _verify_x5c_chain(x5c: List[str], trust_anchor: str, at_time: Optional[str] 
             unt = os.path.join(d, "untrusted.pem")
             _tmp_write(unt, b"".join(pem(c) for c in chain[1:]))
             cmd += ["-untrusted", unt]
-        r = subprocess.run(cmd + [leaf_path], capture_output=True, text=True, timeout=timeout)
+        r = _run_openssl(cmd + [leaf_path], timeout, text=True)
         return r.returncode == 0 and ": OK" in (r.stdout or "")
     except Ap2WriteError:
         raise
@@ -943,7 +957,6 @@ def _verify_rfc3161(tsr_b64: str, expected_digest_hex: str, timeout: int = 15, t
     1.1.0 r1: a self-forged TimeStampResp with status 0 and the right imprint used to pass the JS verifier and to
     fail this one only because `openssl ts -reply -text` refused the minimal DER — neither was a check of the TSA."""
     import shutil
-    import subprocess
     try:
         tsr = _sigsuite._unb64(tsr_b64)                       # strict base64 (a space inside the token used to be skipped)
     except (ValueError, TypeError):
@@ -972,7 +985,7 @@ def _verify_rfc3161(tsr_b64: str, expected_digest_hex: str, timeout: int = 15, t
             # AFTER issuing does not turn `tsa_verified` False years later; revocation is not checked (declared)
             import calendar, time as _t
             cmd += ["-attime", str(calendar.timegm(_t.strptime(info["gen_time"].split(".")[0].rstrip("Z"), "%Y%m%d%H%M%S")))]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        r = _run_openssl(cmd, timeout, text=True)
         out["tsa_verified"] = r.returncode == 0 and "Verification: OK" in (r.stdout or "")
         if not out["tsa_verified"]:   # `verified` keeps its §3.2 meaning (binding); the TSA outcome is its own field, in both verifiers
             out["tsa_note"] = (r.stderr or r.stdout).strip()[-160:]

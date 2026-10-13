@@ -892,6 +892,32 @@ class TestOpensslTemporaryFiles(unittest.TestCase):
         self.assertEqual(p.returncode, 3, p.stderr)
         self.assertTrue(p.stdout.startswith(b"cannot write a temporary file for openssl"), p.stdout)
 
+    def _nproc(self, cmd):
+        import resource
+
+        def pre():
+            resource.setrlimit(resource.RLIMIT_NPROC, (1, 1))   # this user runs more than one process: fork is refused
+        p = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, preexec_fn=pre, timeout=300)
+        return p.returncode, p.stdout, p.stderr
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "RLIMIT_NPROC does not bind root")
+    def test_openssl_that_cannot_be_started_here_is_74_not_a_failed_check(self):
+        """openssl that cannot be started (fork refused: RLIMIT_NPROC 1) was a failed check: measured on 732705d and
+        cb36d56, `--tsa-cert --require-anchor` on a valid pack gave `tsa_verified: false`, `valid: false`, exit 1, and
+        `--trust-anchor` gave `chain_verified: false`. Now the check could not be run here: exit 74, one line."""
+        line = b"receipt not written: cannot run openssl here: BlockingIOError: Resource temporarily unavailable\n"
+        for cmd in (_PY + ["verify", os.path.join(_VEC, "anchor_valid.json"), "--tsa-cert",
+                           os.path.join(_VEC, "anchor_probe_tsa.crt"), "--require-anchor"],
+                    _PY + ["verify", os.path.join(_VEC, "anchor_valid.json"), "--tsa-cert", os.path.join(_VEC, "anchor_probe_tsa.crt")],
+                    _PY + ["verify", self.x5c, "--trust-anchor", self.ca]):
+            with self.subTest(cmd=cmd[3:]):
+                rc, out, err = self._run(cmd, None)   # the control: the check runs and passes
+                self.assertEqual((rc, err), (0, b""))
+                rc, out, err = self._nproc(cmd)
+                self.assertEqual((rc, out, err), (74, b"", line))
+        rc, out, err = self._nproc(_PY + ["verify", os.path.join(_VEC, "anchor_valid.json")])   # no openssl asked for:
+        self.assertEqual((rc, err), (0, b""))                                                  # the limit changes nothing
+
     def test_stamp_query_needs_no_temporary_file(self):
         tsa = _Tsa()
         try:
