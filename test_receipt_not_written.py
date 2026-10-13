@@ -16,10 +16,12 @@ import http.server
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -453,6 +455,219 @@ class TestStderrLost(unittest.TestCase):
         self.assertEqual((rc, out), (1, b"")); self.assertTrue(err.startswith(b'{"error": '), err)
         rc, out, err = _run(_PY + ["stamp", self.bad, "--tsa", "http://127.0.0.1:9/"], "file")
         self.assertEqual((rc, out), (1, b"")); self.assertIn(b"not stamped", err)
+
+
+def _cpu_seconds(pid):
+    """utime + stime of a live process, all its threads, from /proc (Linux)."""
+    with open(f"/proc/{pid}/stat", "rb") as f:
+        fields = f.read().rsplit(b")", 1)[1].split()
+    return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+
+
+def _run_prefilled(cmd, which=1, env=None, cwd=None, other_devfull=False):
+    """fd `which` (1 = stdout, 2 = stderr) is a NON-BLOCKING pipe that is already full when the process starts, and
+    nobody reads it for a while: the process must wait asleep, as on a blocking pipe — still alive, and in some 1-second
+    window (looked at from the 1st to the 10th second, so a slow start is not taken for a spin) using under 0.2 s of CPU,
+    which a loop retrying EAGAIN never does — and once the pipe is drained what it had to say must arrive whole. The other
+    stream goes to a regular file (or /dev/full). Returns (idle, rc, bytes after the filler or None, the other stream's bytes)."""
+    import fcntl
+    r, w = os.pipe()
+    fcntl.fcntl(w, fcntl.F_SETFL, fcntl.fcntl(w, fcntl.F_GETFL) | os.O_NONBLOCK)
+    filled = 0
+    while True:
+        try:
+            filled += os.write(w, b"P" * 4096)
+        except BlockingIOError:
+            break
+    other = tempfile.TemporaryFile()
+    dest = open("/dev/full", "wb") if other_devfull else other
+    try:
+        p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=w if which == 1 else dest,
+                             stderr=w if which == 2 else dest, cwd=cwd, env=dict(os.environ, **(env or {})))
+    finally:
+        os.close(w)
+        if dest is not other:
+            dest.close()
+    idle, t0 = False, time.time()
+    time.sleep(1.0)
+    while p.poll() is None and time.time() - t0 < 10:
+        try:
+            c0 = _cpu_seconds(p.pid)
+            time.sleep(1.0)
+            c1 = _cpu_seconds(p.pid)
+        except OSError:   # exited during the window
+            break
+        if p.poll() is not None:
+            break
+        if c1 - c0 < 0.2:
+            idle = True
+            break
+    chunks = []
+    while True:
+        b = os.read(r, 1 << 16)
+        if not b:
+            break
+        chunks.append(b)
+    os.close(r)
+    rc = p.wait(timeout=120)
+    other.seek(0)
+    rest = other.read()
+    other.close()
+    data = b"".join(chunks)
+    return idle, rc, (data[filled:] if data[:filled] == b"P" * filled else None), rest
+
+
+@unittest.skipUnless(os.name == "posix" and os.path.exists("/proc/self/stat"), "POSIX pipes and /proc needed")
+class TestWholeOrWaited(unittest.TestCase):
+    """1.5.2, second pass (13/10/2026, measured on a410964 with real processes): with PYTHONUNBUFFERED=1 (or -u) the
+    receipt went to a raw FileIO whose short write the text layer dropped in silence (exit 0 or 1 with 24 bytes of it on a
+    file of 1 000 bytes under `ulimit -f 1`; exit 0 through `| head -c 100` with a receipt of 84 620 bytes); a full
+    non-blocking stdout read 1 s late gave 74 with 65 536 bytes in the pipe (buffered) or 0 with them (unbuffered); a
+    refusal, a usage message or the "receipt not written" line on a full non-blocking stderr was lost (74, or 120 on
+    1.5.1), the JS usage line too. Now every one of them is written whole or waited for."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.d = tempfile.mkdtemp(prefix="ap2_wow_")
+        cls.big = _big_valid_pack(cls.d)
+        with open(os.path.join(cls.d, "not_sdjwt.txt"), "w") as f:
+            f.write("this is not an SD-JWT\n")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.d, ignore_errors=True)
+
+    def _fsize_cut(self, cmd, env):
+        """stdout appended to a file that already holds 1 000 bytes, under RLIMIT_FSIZE 1 024: 24 bytes, then EFBIG."""
+        import resource
+        import signal
+        o = os.path.join(self.d, "cut")
+        with open(o, "wb") as f:
+            f.write(b"x" * 1000)
+
+        def pre():
+            signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
+            resource.setrlimit(resource.RLIMIT_FSIZE, (1024, 1024))
+        with open(o, "ab") as f, tempfile.TemporaryFile() as err:
+            p = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=f, stderr=err, preexec_fn=pre,
+                               env=dict(os.environ, **env), timeout=300)
+            err.seek(0)
+            return p.returncode, err.read()
+
+    def test_unbuffered_short_write_is_74(self):
+        u = {"PYTHONUNBUFFERED": "1"}
+        for path in (_VALID, _INVALID, self.big):
+            with self.subTest(input=os.path.basename(path)):
+                rc, err = self._fsize_cut(_PY + ["verify", path], u)
+                self.assertEqual(rc, 74, err)
+                self.assertTrue(err.startswith(b"receipt not written: ") and b"File too large" in err and err.count(b"\n") == 1, err)
+        rc, err = self._fsize_cut(_PY + ["verify", _VALID], {})   # the control: buffered was 74 already
+        self.assertEqual(rc, 74, err)
+
+    def test_unbuffered_big_receipt_to_a_reader_that_left_is_74(self):
+        p = subprocess.run(["bash", "-c", '{ sleep 0.2; exec "$@"; } | head -c 100 >/dev/null; exit "${PIPESTATUS[0]}"', "_"]
+                           + _PY + ["verify", self.big], env=dict(os.environ, PYTHONUNBUFFERED="1"),
+                           stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=300)
+        self.assertEqual(p.returncode, 74, p.stderr)
+        self.assertTrue(p.stderr.startswith(b"receipt not written: "), p.stderr)
+
+    def _whole_when_drained(self, cmd, env=None):
+        with tempfile.TemporaryFile() as f:
+            ctl = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.DEVNULL,
+                                 env=dict(os.environ, **(env or {})), timeout=300)
+            f.seek(0)
+            whole = f.read()
+        idle, rc, got, err = _run_prefilled(cmd, 1, env)
+        self.assertTrue(idle, "no 1-second window under 0.2 s of CPU: a spin, or it never waited")
+        self.assertEqual((rc, err), (ctl.returncode, b""))
+        self.assertEqual(got, whole)
+
+    def test_full_non_blocking_stdout_is_waited_for_python(self):
+        for env in ({}, {"PYTHONUNBUFFERED": "1"}):
+            for path in (_VALID, self.big):
+                with self.subTest(env=env, input=os.path.basename(path)):
+                    self._whole_when_drained(_PY + ["verify", path], env)
+
+    @unittest.skipUnless(_NODE, "node needed")
+    def test_full_non_blocking_stdout_is_waited_for_js(self):   # libuv waited already: a guard
+        for path in (_VALID, self.big):
+            with self.subTest(input=os.path.basename(path)):
+                self._whole_when_drained([_NODE, _JS, path])
+
+    def _stderr_waited(self, cmd, code, start, stdout_devfull=False):
+        idle, rc, got, out = _run_prefilled(cmd, 2, cwd=self.d, other_devfull=stdout_devfull)
+        self.assertTrue(idle, "no 1-second window under 0.2 s of CPU: a spin, or it never waited")
+        self.assertEqual(rc, code, got)
+        self.assertTrue(got is not None and got.startswith(start) and got.endswith(b"\n"), got)
+        self.assertEqual(out, b"")
+
+    def test_full_non_blocking_stderr_is_waited_for_python(self):
+        bad = os.path.join(_VEC, "digest_mismatch.json")
+        self._stderr_waited(_PY + ["verify"], 2, b"usage: ")
+        self._stderr_waited(_PY + ["build", os.path.join(self.d, "r.json"), "checkout=not_sdjwt.txt"], 1, b'{"error": ')
+        self._stderr_waited(_PY + ["stamp", bad, "--tsa", "http://127.0.0.1:9/"], 1, b'{"error": ')
+        self._stderr_waited(_PY + ["verify", _VALID], 74, b"receipt not written: ", stdout_devfull=True)
+
+    @unittest.skipUnless(_NODE, "node needed")
+    def test_full_non_blocking_stderr_is_waited_for_js(self):
+        self._stderr_waited([_NODE, _JS], 2, b"usage: ")
+        self._stderr_waited([_NODE, _JS, "--bogus", _VALID], 2, b"usage: ")
+        self._stderr_waited([_NODE, _JS, _VALID], 74, b"receipt not written: ", stdout_devfull=True)
+
+    def test_encodings_are_the_text_layers(self):
+        """The receipt's bytes are the ones Python's own stdout text layer writes for the same text, in five encodings (a
+        byte order mark included or not as that layer decides: utf-16 and utf-32 write one on a new file, none on a pipe or
+        after bytes already in the file) and one error handler, to a new file, appended to a file and to a pipe, buffered
+        and unbuffered. The reference is a second process writing the same text with sys.stdout.write."""
+        text_path = os.path.join(self.d, "receipt.txt")
+        with open(text_path, "w", encoding="utf-8", newline="") as f:
+            f.write(json.dumps(ap2.verify_evidence(_VALID), indent=1) + "\n")
+        ref = [sys.executable, "-c", "import sys; sys.stdout.write(open(sys.argv[1], encoding='utf-8', newline='').read())", text_path]
+
+        def out_of(argv, enc, dest, env):
+            e = dict(os.environ, PYTHONIOENCODING=enc, **env)
+            if dest == "pipe":
+                return subprocess.run(argv, env=e, capture_output=True, timeout=120).stdout
+            o = os.path.join(self.d, "o")
+            with open(o, "wb") as f:
+                f.write(b"PRE" if dest == "append" else b"")
+            with open(o, "ab" if dest == "append" else "wb") as f:
+                subprocess.run(argv, env=e, stdout=f, timeout=120)
+            with open(o, "rb") as f:
+                return f.read()
+        for enc in ("utf-8", "utf-16", "utf-32", "utf-8-sig", "latin-1", "ascii:backslashreplace"):
+            for dest in ("file", "append", "pipe"):
+                for env in ({}, {"PYTHONUNBUFFERED": "1"}):
+                    with self.subTest(enc=enc, dest=dest, env=env):
+                        a, b = out_of(_PY + ["verify", _VALID], enc, dest, env), out_of(ref, enc, dest, env)
+                        self.assertGreater(len(b), 10)
+                        self.assertEqual(a, b)
+
+    def test_in_process_streams(self):
+        """main() in process with sys.stdout replaced: a StringIO (no bytes below it), a TextIOWrapper over io.BytesIO
+        (pytest's capsys: bytes below, no descriptor) with and without write_through, and one the caller wrote to first."""
+        import io
+        for make in (io.StringIO, lambda: io.TextIOWrapper(io.BytesIO(), encoding="utf-8", write_through=True),
+                     lambda: io.TextIOWrapper(io.BytesIO(), encoding="utf-8")):
+            s = make()
+            saved = sys.stdout
+            sys.stdout = s
+            try:
+                rc = ap2.main(["verify", _VALID])
+            finally:
+                sys.stdout = saved
+            text = s.getvalue() if isinstance(s, io.StringIO) else s.buffer.getvalue().decode("utf-8")
+            self.assertEqual((rc, json.loads(text)["valid"]), (0, True), type(s).__name__)
+        s = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+        s.write("before\n")
+        saved = sys.stdout
+        sys.stdout = s
+        try:
+            rc = ap2.main(["verify", _VALID])
+        finally:
+            sys.stdout = saved
+        head, _, rest = s.buffer.getvalue().decode("utf-8").partition("\n")
+        self.assertEqual((rc, head, json.loads(rest)["valid"]), (0, "before", True))
 
 
 if __name__ == "__main__":

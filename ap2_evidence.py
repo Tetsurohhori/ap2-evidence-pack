@@ -1378,8 +1378,77 @@ def _to_devnull(stream) -> None:
         pass
 
 
+def _text_layer_bytes(stream, buf, text: str) -> bytes:
+    """The bytes Python's own text layer over `buf` writes for `text` as the first thing written: its encoding and error
+    handler, "\\n" as os.linesep where the platform translates it (not Linux; not measured here), and a byte order mark
+    only where that layer puts one: utf-16 / utf-32 only on a stream seekable at offset 0 (a file), utf-8-sig on a pipe
+    too, none on a seekable stream past offset 0 (measured on Python 3.9, 3.11 and 3.13, 13/10/2026)."""
+    import codecs
+    if os.linesep != "\n":
+        text = text.replace("\n", os.linesep)
+    encoding = stream.encoding or "utf-8"
+    enc = codecs.getincrementalencoder(encoding)(stream.errors or "strict")
+    try:
+        seekable = buf.seekable()
+        at_start = seekable and buf.tell() == 0
+    except (OSError, ValueError):
+        seekable = at_start = False
+    if (seekable and not at_start) or (not seekable and codecs.lookup(encoding).name in ("utf-16", "utf-32")):
+        enc.setstate(0)   # no byte order mark
+    return enc.encode(text, final=True)
+
+
+def _wait_writable(buf) -> None:
+    """The stream is non-blocking and full: wait until it can take more, as a blocking write would (the reader is slow,
+    not gone; one that goes away makes the next write EPIPE). `select` sleeps in the kernel and Python retries it after a
+    signal (PEP 475). The descriptor is asked for only here: a byte stream with no descriptor (an io.BytesIO under a
+    TextIOWrapper, as pytest's capsys) never blocks. POSIX only: on Windows `select` waits on sockets only, so a full
+    non-blocking pipe there is reported as 74 (not measured)."""
+    import select
+    try:
+        select.select([], [buf.fileno()], [])
+    except (OSError, ValueError) as e:   # no descriptor, or one select cannot wait on
+        raise OSError(f"non-blocking and cannot be waited for: {e}")
+
+
+def _write_all(stream, text: str) -> None:
+    """Write the whole text to `stream` (stdout or stderr) and flush it; raise when it did not all get there. The bytes go
+    to `stream.buffer` in a loop that checks the count: with -u or PYTHONUNBUFFERED that is a raw FileIO whose write() can
+    take part of the data (`ulimit -f`, a disk nearly full) and return the count without raising, or return None (a full
+    non-blocking pipe), and the text layer above dropped the rest in silence (measured 13/10/2026 on 1.5.2 before this
+    change: exit 0 with 24 bytes of the receipt on a file under `ulimit -f 1`). A non-blocking stream that is full is
+    waited for, never given up on (before: 74 with 65 536 bytes in the pipe, or 0 with them under -u). A text stream
+    with no bytes below it (io.StringIO) gets the text itself."""
+    stream.flush()   # whatever the text layer still holds goes first
+    buf = getattr(stream, "buffer", None)
+    if buf is None:
+        stream.write(text)
+        stream.flush()
+        return
+    data = memoryview(_text_layer_bytes(stream, buf, text))
+    while data:
+        try:
+            n = buf.write(data)
+            waited = False
+        except BlockingIOError as e:   # buffered stream on a full non-blocking pipe: part of it taken
+            n, waited = e.characters_written, True
+        if n is None:   # raw stream on a full non-blocking pipe: nothing taken
+            n, waited = 0, True
+        if n < 0 or n > len(data) or (n == 0 and not waited):
+            raise OSError(f"short write: {len(data)} bytes not written")
+        data = data[n:]
+        if data and waited:
+            _wait_writable(buf)
+    while True:   # flushed HERE, before the exit code is chosen, not by the interpreter at exit
+        try:
+            buf.flush()
+            return
+        except BlockingIOError:
+            _wait_writable(buf)
+
+
 def _emit(text: str) -> Optional[str]:
-    """Write the receipt to stdout and FLUSH it here, before the exit code is chosen. Returns None when every byte was
+    """Write the receipt to stdout whole and flushed, before the exit code is chosen. Returns None when every byte was
     handed to the OS, else the reason. Before 1.5.2 the receipt went through print(): on /dev/full or a closed pipe a
     receipt that fit the stream buffer failed at the interpreter's final flush (exit 120, "Exception ignored"), a larger
     one failed inside print() (a traceback, exit 1, also for a valid pack: 84 620 bytes measured), and with stdout closed
@@ -1388,22 +1457,31 @@ def _emit(text: str) -> Optional[str]:
     if out is None:
         return "stdout is closed"
     try:
-        out.write(text + "\n")
-        out.flush()
+        _write_all(out, text + "\n")
         return None
-    except (OSError, ValueError) as e:   # ENOSPC, EPIPE, EBADF; ValueError: write to a closed file object
+    except (OSError, ValueError) as e:   # ENOSPC, EPIPE, EBADF, EFBIG; ValueError: write to a closed file object
         _to_devnull(out)
         return f"{type(e).__name__}: {e}"
 
 
+def _say(text: str) -> bool:
+    """Write `text` to stderr without ever raising, through the same writer as the receipt (a full non-blocking stderr is
+    waited for); True when it was written. A stderr that fails is pointed at the null device, so the interpreter's last
+    flush cannot fail again and turn the exit code into 120."""
+    err = sys.stderr
+    if err is None:
+        return False
+    try:
+        _write_all(err, text)
+        return True
+    except (OSError, ValueError):
+        _to_devnull(err)
+        return False
+
+
 def _not_written(reason: str) -> int:
     """One line on stderr, if stderr can take it; the exit is EX_IOERR either way."""
-    try:
-        if sys.stderr is not None:
-            sys.stderr.write(f"receipt not written: {reason}\n")
-            sys.stderr.flush()
-    except (OSError, ValueError):
-        _to_devnull(sys.stderr)
+    _say(f"receipt not written: {reason}\n")
     return EX_IOERR
 
 
@@ -1411,14 +1489,9 @@ def _refused(msg: str) -> int:
     """A refusal of `build` / `stamp`: one `{"error": ...}` line on stderr, exit 1; never on stdout. When that line cannot
     be written (stderr on /dev/full, or closed) the exit is EX_IOERR, as for a lost receipt (1.5.2 review: before, stderr
     full gave the interpreter's 120 and stderr closed sent the refusal to stdout)."""
-    err = sys.stderr
-    try:
-        err.write(json.dumps({"error": msg}) + "\n")
-        err.flush()
+    if _say(json.dumps({"error": msg}) + "\n"):
         return 1   # a closed stderr (_ClosedStderr) turns this into EX_IOERR in main()
-    except (OSError, ValueError):
-        _to_devnull(err)
-        return EX_IOERR
+    return EX_IOERR
 
 
 class _ClosedStderr:
@@ -1444,6 +1517,10 @@ class _Parser(argparse.ArgumentParser):
         if not message:
             return
         file = sys.stderr if file is None else file
+        if file is sys.stderr:
+            if not _say(message):
+                _Parser.stderr_lost = True
+            return
         try:
             file.write(message)
         except (OSError, ValueError):

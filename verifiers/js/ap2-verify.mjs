@@ -410,7 +410,7 @@ export function verifyEvidence(path, opts = {}) {
 }
 function main(argv) {
   // 1.5.2 review: a usage line that stderr does not take (/dev/full) is 74, as in the Python CLI (console.error dropped the error and exited 2)
-  const usage = () => { try { writeSync(2, "usage: ap2-verify.mjs <evidence.json> [--trusted-producer-key ALG=B64]... [--require-producer] [--require-pq] [--require-anchor] [--min-anchors N] [--tsa-cert PEM] [--trust-anchor PEM]\n"); } catch { process.exit(EX_IOERR); } process.exit(2); };
+  const usage = () => { try { writeAllSync(2, "usage: ap2-verify.mjs <evidence.json> [--trusted-producer-key ALG=B64]... [--require-producer] [--require-pq] [--require-anchor] [--min-anchors N] [--tsa-cert PEM] [--trust-anchor PEM]\n"); } catch { process.exit(EX_IOERR); } process.exit(2); };
   const a = argv.slice(2); const opts = { trusted: null }; let path = null;
   for (let i = 0; i < a.length; i++) { let tok = a[i], eqv = null; const eq = tok.indexOf("="); if (eq > 0 && tok.startsWith("--")) { eqv = tok.slice(eq + 1); tok = tok.slice(0, eq); }
     const nx = () => { const v = eqv !== null ? eqv : a[++i]; if (v === undefined || v === "" || v.startsWith("-")) usage(); return v; };
@@ -430,19 +430,32 @@ function main(argv) {
 // now that is 74 (EX_IOERR) and one line on stderr. Not visible from here: with stdout closed (`>&-`) Node reopens fd 1 on
 // /dev/null, so the write succeeds.
 const EX_IOERR = 74;
+// 1.5.2: every byte to fd, synchronously. A short count continues from the next byte; EAGAIN (a non-blocking pipe that
+// is full: its reader is slow, not gone) waits 1 to 50 ms and retries, as a blocking write would; a write that takes 0
+// bytes is an error. Before, writeSync(2) threw EAGAIN there and the usage line was lost with exit 74 (measured
+// 13/10/2026: stderr on a non-blocking pipe already full at start, read 1 s later).
+const pauseMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+function writeAllSync(fd, data) {
+  const buf = typeof data === "string" ? Buffer.from(data, "utf8") : data; let off = 0, pause = 1;
+  while (off < buf.length) {
+    let n;
+    try { n = writeSync(fd, buf, off, buf.length - off); } catch (e) { if (e.code !== "EAGAIN") throw e; pauseMs(pause); pause = Math.min(pause * 2, 50); continue; }
+    if (!(n > 0)) throw new Error(`short write: ${buf.length - off} bytes not written`);
+    off += n; pause = 1;
+  }
+}
 function emit(text, code) {
   // 1.5.2 review: on a REGULAR FILE that stops growing, process.stdout.write lost the rest of the receipt with no error
   // (measured: `ulimit -f 4`, 4 096 of 84 432 bytes, exit 0, Node 22 and 24). There the receipt is written in a loop to
   // its last byte, and a failed write (EFBIG, ENOSPC) is 74.
   let st = null; try { st = fstatSync(1); } catch { st = null; }
   if (st && st.isFile()) {
-    const buf = Buffer.from(text + "\n", "utf8"); let off = 0;
     try {
-      while (off < buf.length) off += writeSync(1, buf, off, buf.length - off);
+      writeAllSync(1, text + "\n");
       process.exitCode = code;
     } catch (err) {
       process.exitCode = EX_IOERR;
-      try { writeSync(2, `receipt not written: ${err.code ?? err.message ?? err}\n`); } catch { /* exit 74 anyway */ }
+      try { writeAllSync(2, `receipt not written: ${err.code ?? err.message ?? err}\n`); } catch { /* exit 74 anyway */ }
     }
     return;
   }
