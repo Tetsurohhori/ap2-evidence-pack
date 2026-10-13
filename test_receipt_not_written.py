@@ -614,6 +614,24 @@ class TestWholeOrWaited(unittest.TestCase):
         self._stderr_waited([_NODE, _JS, "--bogus", _VALID], 2, b"usage: ")
         self._stderr_waited([_NODE, _JS, _VALID], 74, b"receipt not written: ", stdout_devfull=True)
 
+    def test_text_the_caller_left_in_the_buffer_is_waited_for_too(self):
+        """main() called in process after the caller wrote text that is still in sys.stdout's buffer, with stdout a
+        non-blocking pipe that is full: the caller's text and then the receipt arrive whole once the pipe is drained, and
+        the exit is the verdict's (on c2734a0 to cb36d56 the first flush sat outside the wait: exit 74, nothing written)."""
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); import ap2_evidence as a; sys.stdout.write('before\\n'); "
+                "sys.exit(a.main(['verify', sys.argv[2]]))")
+        with tempfile.TemporaryFile() as f:
+            subprocess.run(_PY[:1] + [os.path.join(_HERE, "ap2_evidence.py"), "verify", _VALID], stdin=subprocess.DEVNULL,
+                           stdout=f, timeout=300, check=True)
+            f.seek(0)
+            receipt = f.read()
+        # buffered only: under -u the caller's own write goes to the raw pipe at once and Python drops it there, before
+        # main() is called — not text left in the buffer
+        idle, rc, got, err = _run_prefilled([sys.executable, "-c", code, _HERE, _VALID], 1)
+        self.assertTrue(idle, "no 1-second window under 0.2 s of CPU: a spin, or it never waited")
+        self.assertEqual((rc, err), (0, b""))
+        self.assertEqual(got, b"before\n" + receipt)
+
     def test_encodings_are_the_text_layers(self):
         """The receipt's bytes are the ones Python's own stdout text layer writes for the same text, in five encodings (a
         byte order mark included or not as that layer decides: utf-16 and utf-32 write one on a new file, none on a pipe or

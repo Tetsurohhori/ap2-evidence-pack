@@ -1499,8 +1499,15 @@ def _write_all(stream, text: str) -> None:
     change: exit 0 with 24 bytes of the receipt on a file under `ulimit -f 1`). A non-blocking stream that is full is
     waited for, never given up on (before: 74 with 65 536 bytes in the pipe, or 0 with them under -u). A text stream
     with no bytes below it (io.StringIO) gets the text itself."""
-    stream.flush()   # whatever the text layer still holds goes first
     buf = getattr(stream, "buffer", None)
+    while True:   # whatever the text layer still holds goes first: text a caller in process wrote and left unflushed, on a
+        try:      # full non-blocking stream, is waited for like the receipt (before: exit 74 with nothing written)
+            stream.flush()
+            break
+        except BlockingIOError:
+            if buf is None:
+                raise
+            _wait_writable(buf)
     if buf is None:
         stream.write(text)
         stream.flush()
