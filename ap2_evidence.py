@@ -610,11 +610,15 @@ def _run_openssl(cmd: List[str], timeout: int, **kw):
     `ulimit -u` or low memory: EAGAIN/ENOMEM; no descriptor left for its pipes: EMFILE; the binary gone since `which`) is
     Ap2WriteError, the same "this check cannot be run here" as a temporary file that cannot be written: before (1.5.1 to
     cb36d56) it was reported as a failed check — measured 13/10/2026 under RLIMIT_NPROC 1, `verify --tsa-cert
-    --require-anchor` on a valid pack: `tsa_verified: false`, `valid: false`, exit 1. A timeout is not this case: openssl
-    ran and did not answer, which the input can cause, so it stays a failed check."""
+    --require-anchor` on a valid pack: `tsa_verified: false`, `valid: false`, exit 1. openssl that gives no answer within
+    `timeout` seconds is the same case: the check did not finish here, and a machine too slow for it is not a fact about
+    the input (measured 13/10/2026 with an openssl that answers after 20 s: a valid pack was `tsa_verified: false`,
+    `valid: false`, exit 1 under `--require-anchor`)."""
     import subprocess
     try:
         return subprocess.run(cmd, capture_output=True, timeout=timeout, **kw)
+    except subprocess.TimeoutExpired as e:
+        raise Ap2WriteError(f"cannot run openssl here: no answer within {timeout} s") from e
     except OSError as e:
         why = os.strerror(e.errno) if isinstance(e.errno, int) else str(e)
         raise Ap2WriteError(f"cannot run openssl here: {type(e).__name__}: {why}") from e
@@ -639,7 +643,7 @@ def _verify_x5c_chain(x5c: List[str], trust_anchor: str, at_time: Optional[str] 
     Without a proven time the current clock is used, as `openssl verify` does by default.
 
     Returns True/False, or None when openssl is absent (r9: unmeasurable is not the same as failed — `self_asserted_only`
-    stays fail-closed either way)."""
+    stays fail-closed either way); raises Ap2WriteError (1.5.2) when the check cannot be run here (see _run_openssl)."""
     import shutil
     exe = shutil.which("openssl")
     if not exe:
@@ -1240,8 +1244,9 @@ def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = Fa
     """OFFLINE re-verification from the evidence file alone: digest, every signature with
     the SNAPSHOTTED key, every disclosure, every binding, and the RFC 3161 token's binding
     (status + imprint; the TSA itself only with `tsa_cert`, via openssl). Fail-closed. Raises Ap2WriteError (1.5.2) when
-    a check asked for (`tsa_cert`, `trust_anchor`) cannot be run because openssl's temporary files cannot be written here:
-    no verdict, rather than a check reported as failed."""
+    a check asked for (`tsa_cert`, `trust_anchor`) cannot be run here — openssl's temporary files cannot be written,
+    openssl cannot be started, or it gives no answer in time: no verdict, rather than a check reported as failed. openssl
+    absent is not this case: the field is None (not measured) and a policy that needs it is not met."""
     if min_anchors is not None and (type(min_anchors) is not int or min_anchors < 1):   # SPEC §3.3: an integer >= 1 —
         raise ValueError(f"min_anchors must be an integer >= 1 (got {min_anchors!r})")      # 0, NaN or "2" never weakens the policy in silence
     try:

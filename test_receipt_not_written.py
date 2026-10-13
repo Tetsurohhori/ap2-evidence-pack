@@ -11,6 +11,7 @@ traceback for a receipt larger than the stream buffer (a valid pack included), a
 `build` into a path it cannot write raised a traceback (exit 1, the "not valid" code). Every case here runs the real CLI in
 a child process with a real file descriptor: /dev/full (ENOSPC), a pipe whose read end is already closed (EPIPE), fd 1
 closed before exec, and a regular file as the control (verdict code and receipt unchanged)."""
+import errno
 import hashlib
 import http.server
 import json
@@ -1040,6 +1041,200 @@ class TestOpensslTemporaryFiles(unittest.TestCase):
             self.assertEqual(json.loads(out.decode("ascii"))["anchors"], 1)
         finally:
             tsa.close()
+
+
+_SHIM_C = r"""
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <unistd.h>
+static int done = 0;
+ssize_t write(int fd, const void *b, size_t n) {
+  static ssize_t (*real)(int, const void *, size_t) = 0;
+  if (!real) real = (ssize_t (*)(int, const void *, size_t))dlsym(RTLD_NEXT, "write");
+  const char *z = getenv("AP2_TEST_ZERO_FD");
+  if (z && !done && n > 0 && fd == atoi(z)) { done = 1; return 0; }
+  return real(fd, b, n);
+}
+int fsync(int fd) {
+  static int (*real)(int) = 0;
+  if (!real) real = (int (*)(int))dlsym(RTLD_NEXT, "fsync");
+  if (getenv("AP2_TEST_FSYNC_EIO")) { errno = EIO; return -1; }
+  return real(fd);
+}
+"""
+
+
+def _shim(d):
+    """A shared object loaded with LD_PRELOAD: write(2) on fd AP2_TEST_ZERO_FD returns 0 once (no error, nothing taken),
+    fsync(2) fails with EIO when AP2_TEST_FSYNC_EIO is set. None when there is no C compiler (the tests then skip)."""
+    cc = shutil.which("cc") or shutil.which("gcc")
+    if not cc or not sys.platform.startswith("linux"):
+        return None
+    src, so = os.path.join(d, "shim.c"), os.path.join(d, "shim.so")
+    with open(src, "w") as f:
+        f.write(_SHIM_C)
+    p = subprocess.run([cc, "-shared", "-fPIC", "-o", so, src, "-ldl"], capture_output=True, timeout=120)
+    return so if p.returncode == 0 else None
+
+
+@unittest.skipUnless(os.name == "posix", "POSIX needed")
+class TestNemesisFinal(unittest.TestCase):
+    """Cases the 1.5.2 tests did not reach (final review, 13/10/2026): a write that takes 0 bytes, an fsync that fails, a
+    read-only key file, a key path that is not a regular file, a working directory that cannot be written, openssl gone
+    since `which`, openssl that does not answer, and the JS pause on a full stderr that never grows past 50 ms."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.d = tempfile.mkdtemp(prefix="ap2_nemfin_")
+        cls.so = _shim(cls.d)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.d, ignore_errors=True)
+
+    def _env(self, **kw):
+        return dict(os.environ, LD_PRELOAD=self.so, **kw)
+
+    def test_a_write_that_takes_0_bytes_is_74(self):
+        """write(2) that returns 0 for a non-empty buffer took nothing and reported no error: the loop treats it as an error
+        (a short write), it does not spin on it and does not exit with the verdict's code."""
+        if self.so is None:
+            self.skipTest("no C compiler for the LD_PRELOAD shim")
+        cmds = [_PY[:1] + ["-u"] + _PY[1:] + ["verify", _VALID]]
+        if _NODE:
+            cmds.append([_NODE, _JS, _VALID])
+        for cmd in cmds:
+            with self.subTest(cmd=cmd[:2]):
+                with tempfile.TemporaryFile() as out:
+                    p = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.PIPE, timeout=60,
+                                       env=self._env(AP2_TEST_ZERO_FD="1"))
+                    self.assertEqual(p.returncode, 74, p.stderr)
+                    self.assertIn(b"short write", p.stderr)
+                    self.assertEqual(p.stderr.count(b"\n"), 1)
+
+    def test_an_fsync_that_fails_leaves_the_earlier_pack_and_key(self):
+        """fsync(2) reports errors a write did not (EIO, a delayed ENOSPC): the pack and the key file are renamed onto the
+        path only after it succeeds; on failure 74 (build) or OSError (save), and what was there stays."""
+        if self.so is None:
+            self.skipTest("no C compiler for the LD_PRELOAD shim")
+        sub = tempfile.mkdtemp(dir=self.d)
+        subprocess.run([sys.executable, os.path.join(_HERE, "examples", "make_samples.py")], cwd=sub, check=True,
+                       capture_output=True)
+        pk = os.path.join(sub, "p.json")
+        rc, _, err = _run(_PY + ["build", pk, "checkout=checkout.sdjwt"], "file", cwd=sub)
+        self.assertEqual(rc, 0, err)
+        with open(pk, "rb") as f:
+            before = f.read()
+        p = subprocess.run(_PY + ["build", pk, "checkout=checkout.sdjwt", "payment=payment.sdjwt"], cwd=sub, timeout=120,
+                           stdin=subprocess.DEVNULL, capture_output=True, env=self._env(AP2_TEST_FSYNC_EIO="1"))
+        self.assertEqual((p.returncode, p.stdout), (74, b""), p.stderr)
+        self.assertIn(b"Input/output error", p.stderr)
+        with open(pk, "rb") as f:
+            self.assertEqual(f.read(), before)
+        k = os.path.join(sub, "id.json")
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); from pqcrypto import sigsuite as s\n"
+                "try:\n s.ProducerIdentity.create().save(sys.argv[2])\nexcept OSError as e:\n print(e.errno); sys.exit(3)\n")
+        subprocess.run([sys.executable, "-c", code, _HERE, k], check=True, timeout=60)
+        with open(k, "rb") as f:
+            key = f.read()
+        p = subprocess.run([sys.executable, "-c", code, _HERE, k], capture_output=True, timeout=60,
+                           env=self._env(AP2_TEST_FSYNC_EIO="1"))
+        self.assertEqual((p.returncode, p.stdout.strip()), (3, str(errno.EIO).encode()), p.stderr)
+        with open(k, "rb") as f:
+            self.assertEqual(f.read(), key)
+        self.assertEqual(sorted(x for x in os.listdir(sub) if x.startswith(".")), [])
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root writes a read-only file")
+    def test_identity_save_refuses_a_read_only_key_file(self):
+        """A key file its owner made read-only (chmod 400) was refused by 1.5.1 (PermissionError) and must not be replaced
+        by a new key now that the file is renamed onto: the private key it holds would be lost."""
+        from pqcrypto import sigsuite
+        sub = tempfile.mkdtemp(dir=self.d)
+        k = os.path.join(sub, "id.json")
+        sigsuite.ProducerIdentity.create().save(k)
+        os.chmod(k, 0o400)
+        with open(k, "rb") as f:
+            before = f.read()
+        with self.assertRaises(PermissionError):
+            sigsuite.ProducerIdentity.create().save(k)
+        with open(k, "rb") as f:
+            self.assertEqual(f.read(), before)
+        self.assertEqual(stat.S_IMODE(os.stat(k).st_mode), 0o400)
+        self.assertEqual(os.listdir(sub), ["id.json"])
+
+    def test_identity_save_to_a_path_that_is_not_a_regular_file_and_from_another_directory(self):
+        from pqcrypto import sigsuite
+        sigsuite.ProducerIdentity.create().save(os.devnull)   # written directly: no temporary file in /dev
+        self.assertTrue(os.path.exists(os.devnull) and not os.path.isfile(os.devnull))
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            return
+        ro, keys = tempfile.mkdtemp(dir=self.d), tempfile.mkdtemp(dir=self.d)
+        os.chmod(ro, 0o555)
+        self.addCleanup(os.chmod, ro, 0o755)
+        here = os.getcwd()
+        os.chdir(ro)   # the temporary file goes next to the key, not in the working directory
+        try:
+            sigsuite.ProducerIdentity.create().save(os.path.join(keys, "id.json"))
+        finally:
+            os.chdir(here)
+        sigsuite.ProducerIdentity.load(os.path.join(keys, "id.json"))
+
+    @unittest.skipUnless(_OPENSSL, "openssl needed")
+    def test_openssl_gone_since_which_and_openssl_without_an_answer_are_the_write_error(self):
+        """The binary named by `which` no longer there (ENOENT at exec), and an openssl that gives no answer within the
+        time limit: the check did not run here, so Ap2WriteError, never `tsa_verified: false` / "not valid"."""
+        tsa = os.path.join(_VEC, "anchor_probe_tsa.crt")
+        slow = os.path.join(self.d, "slowbin")
+        os.makedirs(slow, exist_ok=True)
+        with open(os.path.join(slow, "openssl"), "w") as f:
+            f.write('#!/bin/sh\nexec sleep 30\n')   # exec: the timeout's kill reaches the sleeping process itself
+        os.chmod(os.path.join(slow, "openssl"), 0o755)
+        code = ("import shutil, sys; sys.path.insert(0, sys.argv[1]); import ap2_evidence as a\n"
+                "if sys.argv[4] == 'gone':\n w = shutil.which; shutil.which = lambda n, *x, **k: '/nonexistent/openssl' if n == 'openssl' else w(n, *x, **k)\n"
+                "else:\n a._verify_rfc3161.__defaults__ = (1, None)\n"
+                "try:\n r = a.verify_evidence(sys.argv[2], tsa_cert=sys.argv[3], require_anchor=True)\n print('verdict', r['valid'], r['rfc3161'].get('tsa_verified'))\n"
+                "except a.Ap2WriteError as e:\n print(e)\n")
+        for how, env, want in (("gone", None, b"cannot run openssl here: FileNotFoundError: No such file or directory"),
+                               ("slow", dict(os.environ, PATH=slow + os.pathsep + os.environ.get("PATH", "")),
+                                b"cannot run openssl here: no answer within 1 s")):
+            with self.subTest(how=how):
+                p = subprocess.run([sys.executable, "-c", code, _HERE, _VALID, tsa, how], capture_output=True, timeout=120,
+                                   env=env)
+                self.assertEqual(p.stdout.strip(), want, p.stderr)
+        p = subprocess.run([sys.executable, "-c", code, _HERE, _VALID, tsa, "none"], capture_output=True, timeout=120)
+        self.assertEqual(p.stdout.strip(), b"verdict True True", p.stderr)   # the control: the check runs and passes
+
+    @unittest.skipUnless(_NODE and os.path.exists("/proc/self/stat"), "node and /proc needed")
+    def test_js_pause_on_a_full_stderr_stays_under_50_ms(self):
+        """The JS loop waits 1 to 50 ms between retries of EAGAIN: once the reader drains a full non-blocking stderr, the
+        usage line arrives within a few pauses, whenever that happens (three phases, so a doubling pause with no ceiling
+        cannot pass by chance)."""
+        import fcntl
+        lags = []
+        for phase in (0.7, 1.0, 1.3):
+            r, w = os.pipe()
+            fcntl.fcntl(w, fcntl.F_SETFL, fcntl.fcntl(w, fcntl.F_GETFL) | os.O_NONBLOCK)
+            while True:
+                try:
+                    os.write(w, b"P" * 4096)
+                except BlockingIOError:
+                    break
+            p = subprocess.Popen([_NODE, _JS], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=w)
+            os.close(w)
+            time.sleep(phase)
+            t0, data = time.monotonic(), b""
+            while True:
+                b = os.read(r, 1 << 16)
+                if not b:
+                    break
+                data += b
+            lags.append(time.monotonic() - t0)
+            os.close(r)
+            self.assertEqual(p.wait(timeout=60), 2)
+            self.assertTrue(data.lstrip(b"P").startswith(b"usage: "), data[-80:])
+        self.assertLess(max(lags), 0.4, lags)
 
 
 if __name__ == "__main__":

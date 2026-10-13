@@ -210,8 +210,9 @@ class ProducerIdentity:
         # longer loadable (measured 13/10/2026: 223 bytes became 100), and an existing file kept its mode (0644 stayed
         # 0644). Now the key goes to a new file with an unpredictable name, created O_EXCL with mode 0600 in the same
         # directory, flushed, fsync'd and closed, then renamed onto `path` (a symlink is followed and stays a link); on any
-        # failure the temporary file is removed and the earlier file is left as it was. A path that is not a regular file
-        # (a FIFO, /dev/stdout) is written directly, as before. Raises OSError.
+        # failure the temporary file is removed and the earlier file is left as it was. An existing key file this process may
+        # not write (mode 0400) is refused with PermissionError, as before, and left as it was. A path that is not a regular
+        # file (a FIFO, /dev/stdout) is written directly, as before. Raises OSError.
         import secrets
         import stat as _stat
         try:
@@ -225,6 +226,9 @@ class ProducerIdentity:
                 json.dump(data, f)
             return path
         real = os.path.realpath(path)
+        if st is not None:   # the kernel's own check, without truncating: a key file made read-only (chmod 400) is refused
+            # as in 1.5.1 (PermissionError), never replaced by a new key behind its owner's back
+            os.close(os.open(real, os.O_WRONLY | getattr(os, "O_CLOEXEC", 0)))
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         while True:
             tmp = os.path.join(os.path.dirname(real) or ".", ".identity-%s.tmp" % secrets.token_hex(8))

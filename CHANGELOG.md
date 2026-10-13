@@ -14,8 +14,9 @@ from the JS verifier):
   of the 84 432 and exited 0, the Python CLI exited 1 with a traceback. Appended to a file already holding 1 000 bytes
   under a 1 024-byte limit, both took 24 bytes: JS exited with the verdict's 0 or 1; Python exited 120 for the small
   receipts, and 1 with a traceback for the large one and for all three under `-u`.
-- stdout a non-blocking pipe read 1 s late: the Python CLI exited 120 (small receipt) or 1 with a traceback (large), and
-  under `-u` / `PYTHONUNBUFFERED=1` exited 0 with 65 536 bytes of the 84 620 in the pipe.
+- stdout a non-blocking pipe read 1 s late: the Python CLI exited 1 with a traceback for the large receipt, and under
+  `-u` / `PYTHONUNBUFFERED=1` exited 0 with 65 536 bytes of the 84 620 in the pipe; the same pipe already full at start:
+  120 for the small receipts, and under `-u` the verdict's 0 or 1 with nothing written.
 - stderr on `/dev/full`, or a non-blocking pipe that is full: a usage error and a refusal of `build` or `stamp` exited
   120 in the Python CLI; the JS usage line was lost with exit 2. stderr closed (`2>&-`): the Python usage and refusal
   text went to stdout: usage exited 1 on Python 3.9 and 3.11, 2 on 3.13; a refusal exited 1 (3.11).
@@ -26,7 +27,9 @@ from the JS verifier):
   (exit 1); `verify --trust-anchor` reported a valid pack "not valid", exit 1. With the file
   openssl reads cut at 100 bytes, `verify --tsa-cert --require-anchor` exited 1, "not valid".
 - with openssl unable to start (`fork` refused under `RLIMIT_NPROC` 1): `verify --tsa-cert --require-anchor` on a
-  valid pack gave `"tsa_verified": false`, `"valid": false`, exit 1; `--trust-anchor` gave `"chain_verified": false`.
+  valid pack gave `"tsa_verified": false`, `"valid": false`, exit 1; `--tsa-cert` alone exit 0 with `"tsa_verified":
+  false`; `--trust-anchor` exit 0 with `"chain_verified": false`. With an openssl that answers after 20 s (the limit is
+  15 s) `--tsa-cert` and `--trust-anchor` gave the same two `false` fields, exit 0.
 - `main()` called in process after the caller wrote text that was still in `sys.stdout`'s buffer, stdout a full
   non-blocking pipe: exit 120.
 
@@ -48,18 +51,20 @@ Now:
   that name is neither written, followed nor waited on), flushed, fsync'd and closed, then renamed onto the path; on a
   failure the temporary file is removed and what was at the path stays as it was. The pack keeps the mode of the pack it
   replaces (0666 less the umask for a new one); the key file is 0600, also when it replaces one (1.5.1 kept an existing
-  file's mode, 0644 included, and a failed save left a 223-byte key file at 100 bytes, no longer loadable). A symlink is
+  file's mode, 0644 included, and a failed save left a 223-byte key file at 100 bytes, no longer loadable); a key file
+  this process may not write (mode 0400) is refused with `PermissionError` and left as it was, as in 1.5.1. A symlink is
   followed and stays a link; a path that is not a regular file (`/dev/stdout`, a FIFO) is written directly, as before.
   One change of behaviour: an existing, writable pack in a directory this process cannot write was rewritten in place
   (exit 0) and is now 74, since no temporary file can be made there. A directory as the pack path is refused before any
   TSA is asked. `build` or `stamp` that cannot write the pack exits 74; after a `stamp` that exits 74, `cannot write the
   stamped pack … not stamped` leaves the pack unchanged, any other reason means the pack holds the new anchor and only
   the receipt was lost.
-- A check asked for that cannot be run here is 74, never "not valid": `verify --tsa-cert` and `--trust-anchor` when the
-  files openssl reads cannot be written (`cannot write a temporary file for openssl: <reason>`) or openssl cannot be
-  started (`cannot run openssl here: <reason>`); `verify_evidence` raises `Ap2WriteError` there. A timeout of openssl is
-  not this case (openssl ran and did not answer, which the input can cause): it stays a failed check. The TSA query of
-  `build --tsa` and `stamp` is read from openssl's stdout, with no temporary file.
+- A check asked for that cannot be run on this machine is 74, never a verdict: `verify --tsa-cert` and `--trust-anchor`
+  when the files openssl reads cannot be written (`cannot write a temporary file for openssl: <reason>`), or openssl
+  cannot be started or gives no answer within its time limit (`cannot run openssl here: <reason>`); `verify_evidence`
+  raises `Ap2WriteError` there. openssl absent is unchanged: the field is `null` (not measured) and `--require-anchor` /
+  `--min-anchors` do not count that anchor (exit 1 when the policy needs it). The TSA query of `build --tsa` and
+  `stamp` is read from openssl's stdout, with no temporary file.
 
 Exit codes 0, 1 and 2 keep their meaning; the 1.5.1 entry below says "the exit codes are unchanged" about 1.5.1. The
 versioning rule reserves a change of exit codes for 2.0: 74 is the one exception, made here and named in the README's
@@ -74,21 +79,22 @@ does: one receipt per process; measured on Python 3.9, 3.11 and 3.13). All of th
 Python's `select` waits on sockets only, so a full non-blocking pipe there would be 74; Windows and macOS are not
 measured.
 
-`test_receipt_not_written.py` (48 tests) runs both CLIs in child processes with real descriptors: a regular file
-(the control), `/dev/full`, a pipe whose reader has gone, fd 1 or 2 closed before exec, `RLIMIT_FSIZE`, a non-blocking
-pipe already full at start (on stdout and on stderr, with a CPU window a spin cannot pass), `-u`, six encodings against
+`test_receipt_not_written.py` (54 tests) runs both CLIs in child processes with real descriptors: a regular file (the
+control), `/dev/full`, a pipe whose reader has gone, fd 1 or 2 closed before exec, `RLIMIT_FSIZE`, a non-blocking pipe
+already full at start (on stdout and on stderr, with a CPU window a spin cannot pass), `-u`, six encodings against
 Python's own text layer, a pack path that cannot be written, an earlier pack and key file left intact, the temporary
-name drawn onto a planted file, FIFO and symlink, `RLIMIT_FSIZE` and `RLIMIT_NPROC` under the openssl checks, and
-`main()` in process. One existing test changes with the code: `test_ap2_anchors.py` expected exit 1 for `stamp` into a
-directory it cannot write and now expects 74 (still "not stamped" on stderr, no traceback). Verdicts, vectors and
-digests are unchanged. `Ap2WriteError`, raised by `build_evidence`, `add_anchor` and `verify_evidence` as above, is both
-an `Ap2EvidenceError` and an `OSError` (`build_evidence` raised an `OSError` there before; `add_anchor` an
-`Ap2EvidenceError`). Against the 1.5.1 files the test file reports 73 failures and errors (subtests included) in 34
-of its 48 tests; on 1.5.2 none, on Python 3.9.25, 3.11.2 and 3.13.15. Of 75 mutants of the lines this release adds or
-changes, it kills 70 (Python 3.11.2, Node 22). Alive: the two guards that take a write of 0 bytes as an error
-(`write(2)` with a count above 0 returns 0 on none of the descriptors used here), the two fsync calls (not observable
-without a crash), and the JS write without its callback but with its `error` listener (Node reports the failed write
-through the event too).
+name drawn onto a planted file, FIFO and symlink, `RLIMIT_FSIZE` and `RLIMIT_NPROC` under the openssl checks, openssl
+gone since `which` and openssl without an answer, a write that takes 0 bytes and an fsync that fails (an `LD_PRELOAD`
+shim, skipped without a C compiler), a read-only key file, and `main()` in process. One existing test changes with the
+code: `test_ap2_anchors.py` expected exit 1 for `stamp` into a directory it cannot write and now expects 74 (still "not
+stamped" on stderr, no traceback). Verdicts, vectors and digests are unchanged. `Ap2WriteError`, raised by
+`build_evidence`, `add_anchor` and `verify_evidence` as above, is both an `Ap2EvidenceError` and an `OSError`
+(`build_evidence` raised an `OSError` there before; `add_anchor` an `Ap2EvidenceError`). Against the 1.5.1 files the
+test file reports 79 failures and errors (subtests included) in 38 of its 54 tests; on 1.5.2 none, on Python 3.9.25,
+3.11.2 and 3.13.15. Of 75 mutants of the lines this release adds or changes, it kills 74 (Python 3.11.2, Node 22).
+Alive: the JS write without its callback but with its `error` listener, equivalent here: Node reports the failed write
+through the event too, and the two gave the same exit code, stdout and stderr in 42 runs (3 packs × 7 stdout modes × 2
+stderr modes), where the write without callback and without listener differed in 12.
 
 ## 1.5.1 — 2026-10-12 — the JS receipt reaches a pipe whole
 
