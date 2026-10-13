@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
 import hashlib
 import json
 import os
@@ -968,6 +969,59 @@ def _verify_one(parsed: Dict, key: Dict) -> Dict:
             "disclosures_ok": True}     # resolve_disclosures raised otherwise
 
 
+def _write_pack_file(path: str, obj) -> None:
+    """Write a pack to `path` whole or not at all (1.5.2). The JSON goes to a new file with an unpredictable name, created
+    O_EXCL in the same directory with the mode a plain open() would give it (or the mode of the pack it replaces), is
+    flushed, fsync'd and closed inside the try, and only then renamed onto `path`; on any failure the temporary file is
+    removed and whatever was at `path` before is left as it was. Before, `build` and `sign_evidence` opened `path` with
+    "w": a write that failed part way (a full disk, `ulimit -f`) truncated an earlier pack at that path (measured on
+    1.5.1: 5 891 bytes became 2 048, and the pack no longer verified). A symlink is followed (the file it names is
+    replaced, the link stays); an existing file this process may not write is refused as before (PermissionError); a
+    path that is not a regular file (a FIFO, /dev/stdout, /dev/null) is written directly, as before, since it cannot be
+    renamed onto. Raises OSError."""
+    import secrets
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        st = None
+    if st is not None and not stat.S_ISREG(st.st_mode):
+        if stat.S_ISDIR(st.st_mode):
+            raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR))
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=1, sort_keys=True)
+        return
+    real = os.path.realpath(path)
+    if st is not None:   # the kernel's own check, without truncating: a read-only pack is not replaced behind its back
+        os.close(os.open(real, os.O_WRONLY | getattr(os, "O_CLOEXEC", 0)))
+    d = os.path.dirname(real) or "."
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    while True:
+        tmp = os.path.join(d, ".ap2-pack-%s.tmp" % secrets.token_hex(8))
+        try:
+            fd = os.open(tmp, flags, 0o666)   # 0o666 less the umask, as open(path, "w") gives a new file
+            break
+        except FileExistsError:
+            continue
+    try:
+        if st is not None:
+            os.fchmod(fd, stat.S_IMODE(st.st_mode))   # the pack keeps its permissions
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = None
+            json.dump(obj, f, ensure_ascii=False, indent=1, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, real)
+        tmp = None
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
 def build_evidence(artifacts: List[Dict], out_path: str,
                    keys: Optional[Dict[str, Dict]] = None,
                    jwks_urls: Optional[Dict[str, str]] = None,
@@ -1016,6 +1070,8 @@ def build_evidence(artifacts: List[Dict], out_path: str,
         "honest_scope": HONEST_SCOPE,
     }
     evidence["evidence_digest_sha256"] = hashlib.sha256(_canon(evidence)).hexdigest()
+    if os.path.isdir(out_path):   # refused before any TSA is asked (the same reason the write itself gives)
+        raise Ap2WriteError(f"cannot write the pack {out_path!r}: IsADirectoryError: {os.strerror(errno.EISDIR)}")
     evidence["rfc3161_timestamp"] = (
         _rfc3161_stamp(evidence["evidence_digest_sha256"], tsa_url)
         if tsa_url else {"anchored": False, "note": "no TSA provided"})
@@ -1032,8 +1088,7 @@ def build_evidence(artifacts: List[Dict], out_path: str,
     if added:
         evidence["anchors"] = added
     try:   # 1.5.2: a pack that cannot be written is EX_IOERR in the CLI, not a traceback (exit 1, the "not valid" code)
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(evidence, f, ensure_ascii=False, indent=1, sort_keys=True)
+        _write_pack_file(out_path, evidence)
     except OSError as e:
         raise Ap2WriteError(f"cannot write the pack {out_path!r}: {type(e).__name__}: {e.strerror or e}") from e
     return {"out": out_path, "artifacts": len(entries),
@@ -1111,8 +1166,7 @@ def sign_evidence(path, identity=None, classical_alg="ed25519"):
     if identity is None:
         identity = _sigsuite.ProducerIdentity.create(classical_alg=classical_alg)
     ev["producer_signatures"] = identity.sign_block(digest.encode("ascii"))
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(ev, f, ensure_ascii=False, indent=1, sort_keys=True)
+    _write_pack_file(path, ev)   # 1.5.2: whole or not at all; the pack read above stays as it was on a failed write
     algs = [x["sig_alg"] for x in ev["producer_signatures"]["signatures"]]
     return {"out": path, "scheme": ev["producer_signatures"]["scheme"], "sig_algs": algs,
             "pq_protected": any(a in _sigsuite.POST_QUANTUM for a in algs),

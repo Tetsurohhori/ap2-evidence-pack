@@ -670,5 +670,136 @@ class TestWholeOrWaited(unittest.TestCase):
         self.assertEqual((rc, head, json.loads(rest)["valid"]), (0, "before", True))
 
 
+@unittest.skipUnless(os.name == "posix", "POSIX permissions and RLIMIT_FSIZE needed")
+class TestPackWrittenWholeOrNotAtAll(unittest.TestCase):
+    """1.5.2, second pass: `build` (and `sign_evidence`) opened the pack path with "w" and wrote into it, so a write that
+    failed part way (a full disk, `ulimit -f`) truncated an earlier pack at that path (measured on 1.5.1 and a410964:
+    5 891 bytes became 2 048 and the pack no longer verified). Now the pack goes to a temporary file in the same directory
+    and is renamed onto the path only when whole."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.d = tempfile.mkdtemp(prefix="ap2_atomic_")
+        subprocess.run([sys.executable, os.path.join(_HERE, "examples", "make_samples.py")], cwd=cls.d, check=True,
+                       capture_output=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.d, ignore_errors=True)
+
+    def _build(self, out, limit=None, tsa=None):
+        import resource
+        import signal
+
+        def pre():
+            signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
+            if limit is not None:
+                resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+        cmd = _PY + ["build", out, "checkout=checkout.sdjwt", "payment=payment.sdjwt"] + (["--tsa", tsa] if tsa else [])
+        with tempfile.TemporaryFile() as o, tempfile.TemporaryFile() as e:
+            p = subprocess.run(cmd, cwd=self.d, stdin=subprocess.DEVNULL, stdout=o, stderr=e, preexec_fn=pre, timeout=300)
+            o.seek(0); e.seek(0)
+            return p.returncode, o.read(), e.read()
+
+    def _leftovers(self, d):
+        return [n for n in os.listdir(d) if n.endswith(".tmp")]
+
+    def test_a_failed_build_leaves_the_earlier_pack_as_it_was(self):
+        sub = tempfile.mkdtemp(dir=self.d)
+        out = os.path.join(sub, "ev.json")
+        rc, _, err = self._build(out)
+        self.assertEqual(rc, 0, err)
+        with open(out, "rb") as f:
+            before = f.read()
+        self.assertGreater(len(before), 2048)
+        rc, raw, err = self._build(out, limit=2048)
+        self.assertEqual(rc, 74, err)
+        self.assertEqual(raw, b"")
+        self.assertTrue(err.startswith(b"receipt not written: cannot write the pack ") and b"File too large" in err, err)
+        with open(out, "rb") as f:
+            self.assertEqual(f.read(), before)
+        self.assertEqual(self._leftovers(sub), [])
+        self.assertTrue(ap2.verify_evidence(out)["valid"])
+
+    def test_a_failed_first_build_leaves_nothing(self):
+        sub = tempfile.mkdtemp(dir=self.d)
+        rc, _, err = self._build(os.path.join(sub, "ev.json"), limit=2048)
+        self.assertEqual(rc, 74, err)
+        self.assertEqual(os.listdir(sub), [])
+
+    def test_mode_symlink_and_read_only(self):
+        sub = tempfile.mkdtemp(dir=self.d)
+        new = os.path.join(sub, "new.json")
+        with open(os.path.join(sub, "ref"), "w"):
+            pass
+        rc, _, err = self._build(new)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(stat.S_IMODE(os.stat(new).st_mode), stat.S_IMODE(os.stat(os.path.join(sub, "ref")).st_mode))
+        os.chmod(new, 0o640)
+        rc, _, err = self._build(new)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(stat.S_IMODE(os.stat(new).st_mode), 0o640)   # the pack it replaces keeps its permissions
+        link = os.path.join(sub, "link.json")
+        os.symlink("new.json", link)
+        rc, raw, err = self._build(link)
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(os.path.islink(link))   # the file it names is replaced, the link stays
+        self.assertEqual(json.loads(raw.decode("ascii"))["out"], link)
+        if os.geteuid() != 0:
+            os.chmod(new, 0o444)
+            with open(new, "rb") as f:
+                before = f.read()
+            rc, _, err = self._build(new)
+            self.assertEqual(rc, 74, err)
+            self.assertIn(b"PermissionError", err)
+            with open(new, "rb") as f:
+                self.assertEqual(f.read(), before)
+        self.assertEqual(self._leftovers(sub), [])
+
+    def test_a_path_that_is_not_a_regular_file_is_written_directly(self):
+        rc, raw, err = self._build(os.devnull)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(raw.decode("ascii"))["out"], os.devnull)
+        self.assertTrue(os.path.exists(os.devnull) and not os.path.isfile(os.devnull))
+
+    def test_a_directory_is_refused_before_any_tsa_is_asked(self):
+        hits = []
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                hits.append(1)
+                self.send_response(503)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            sub = tempfile.mkdtemp(dir=self.d)
+            rc, raw, err = self._build(sub, tsa="http://127.0.0.1:%d/" % srv.server_address[1])
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        self.assertEqual((rc, raw, hits), (74, b"", []), err)
+        self.assertEqual(err, ("receipt not written: cannot write the pack %r: IsADirectoryError: Is a directory\n" % sub).encode())
+
+    def test_sign_evidence_leaves_the_pack_as_it_was_when_it_cannot_write(self):
+        sub = tempfile.mkdtemp(dir=self.d)
+        out = os.path.join(sub, "ev.json")
+        rc, _, err = self._build(out)
+        self.assertEqual(rc, 0, err)
+        with open(out, "rb") as f:
+            before = f.read()
+        code = ("import resource, signal, sys; sys.path.insert(0, sys.argv[1]); import ap2_evidence as a; "
+                "signal.signal(signal.SIGXFSZ, signal.SIG_IGN); resource.setrlimit(resource.RLIMIT_FSIZE, (2048, 2048))\n"
+                "try:\n a.sign_evidence(sys.argv[2])\nexcept OSError as e:\n print(type(e).__name__); sys.exit(3)\n")
+        p = subprocess.run([sys.executable, "-c", code, _HERE, out], capture_output=True, timeout=300)
+        self.assertEqual(p.returncode, 3, p.stderr)
+        with open(out, "rb") as f:
+            self.assertEqual(f.read(), before)
+        self.assertEqual(self._leftovers(sub), [])
+
+
 if __name__ == "__main__":
     unittest.main()
