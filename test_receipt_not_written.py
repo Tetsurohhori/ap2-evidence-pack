@@ -801,5 +801,91 @@ class TestPackWrittenWholeOrNotAtAll(unittest.TestCase):
         self.assertEqual(self._leftovers(sub), [])
 
 
+@unittest.skipUnless(_OPENSSL and os.name == "posix", "openssl and RLIMIT_FSIZE needed")
+class TestOpensslTemporaryFiles(unittest.TestCase):
+    """1.5.2, second pass: `verify --tsa-cert` and `verify --trust-anchor` hand openssl files in a temporary directory, and
+    `stamp` / `build --tsa` wrote the query there. Measured on a410964 (13/10/2026) with no writable temporary file
+    (`ulimit -f 0`): `verify --tsa-cert` on a valid pack raised a traceback (exit 1, the "not valid" code), `--trust-anchor`
+    reported the artifact as an error (a valid pack "not valid", exit 1) and `stamp` raised a traceback (exit 1). Now a check
+    that cannot be run here is exit 74 with one line, and the TSA query is read from openssl's stdout."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, os.path.join(_HERE, "verifiers"))
+        import differential_oracle as O
+        cls.d = tempfile.mkdtemp(prefix="ap2_tmpf_")
+        with open(os.path.join(_VEC, "valid_signed.json"), encoding="utf-8") as f:
+            base = json.load(f)
+        cases = dict(O._x5c_cases(base))
+        cls.x5c = os.path.join(cls.d, "x5c.json")
+        with open(cls.x5c, "w", encoding="utf-8") as f:
+            json.dump(O.rehash(cases["ca-issued-leaf"]), f)
+        cls.ca = os.path.join(cls.d, "ca.pem")
+        with open(cls.ca, "wb") as f:
+            f.write(O._x5c_cases.ca_pem)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.d, ignore_errors=True)
+
+    def _run(self, cmd, limit):
+        import resource
+
+        def pre():
+            if limit is not None:
+                resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+        p = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, preexec_fn=pre, timeout=300)
+        return p.returncode, p.stdout, p.stderr
+
+    def _check(self, cmd, field):
+        rc, out, err = self._run(cmd, None)   # the control: the check runs and passes
+        self.assertEqual((rc, err), (0, b""))
+        self.assertIn(field, out)
+        # 0: no temporary directory passes tempfile's probe; 100: the probe passes, the file openssl reads does not fit
+        for limit, why in ((0, b"no usable temporary directory"), (100, b"OSError: File too large")):
+            rc, out, err = self._run(cmd, limit)
+            self.assertEqual((rc, out), (74, b""), err)
+            self.assertEqual(err, b"receipt not written: cannot write a temporary file for openssl: " + why + b"\n")
+
+    def test_verify_tsa_cert(self):
+        self._check(_PY + ["verify", os.path.join(_VEC, "anchor_valid.json"), "--tsa-cert",
+                           os.path.join(_VEC, "anchor_probe_tsa.crt"), "--require-anchor"], b'"tsa_verified": true')
+
+    def test_verify_trust_anchor(self):
+        self._check(_PY + ["verify", self.x5c, "--trust-anchor", self.ca], b'"chain_verified": true')
+
+    def test_library_raises_the_write_error(self):   # never a check reported as failed
+        code = ("import resource, sys; sys.path.insert(0, sys.argv[1]); import ap2_evidence as a; "
+                "resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))\n"
+                "try:\n a.verify_evidence(sys.argv[2], trust_anchor=sys.argv[3])\n"
+                "except a.Ap2WriteError as e:\n print(str(e)); sys.exit(3)\n")
+        p = subprocess.run([sys.executable, "-c", code, _HERE, self.x5c, self.ca], capture_output=True, timeout=300)
+        self.assertEqual(p.returncode, 3, p.stderr)
+        self.assertTrue(p.stdout.startswith(b"cannot write a temporary file for openssl"), p.stdout)
+
+    def test_stamp_query_needs_no_temporary_file(self):
+        tsa = _Tsa()
+        try:
+            sub = tempfile.mkdtemp(dir=self.d)
+            subprocess.run([sys.executable, os.path.join(_HERE, "examples", "make_samples.py")], cwd=sub, check=True,
+                           capture_output=True)
+            p = os.path.join(sub, "ev.json")
+            rc, _, err = _run(_PY + ["build", p, "checkout=checkout.sdjwt", "payment=payment.sdjwt"], "file", cwd=sub)
+            self.assertEqual(rc, 0, err)
+            with open(p, "rb") as f:
+                before = f.read()
+            # under RLIMIT_FSIZE 0 the token is obtained (no temporary file), then the pack cannot be written: 74, unchanged
+            rc, out, err = self._run(_PY + ["stamp", p, "--tsa", tsa.url], 0)
+            self.assertEqual((rc, out), (74, b""), err)
+            self.assertTrue(err.startswith(b"receipt not written: cannot write the stamped pack"), err)
+            with open(p, "rb") as f:
+                self.assertEqual(f.read(), before)
+            rc, out, err = self._run(_PY + ["stamp", p, "--tsa", tsa.url], None)
+            self.assertEqual((rc, err), (0, b""))
+            self.assertEqual(json.loads(out.decode("ascii"))["anchors"], 1)
+        finally:
+            tsa.close()
+
+
 if __name__ == "__main__":
     unittest.main()

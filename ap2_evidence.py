@@ -584,6 +584,35 @@ def _serialization():
     return serialization
 
 
+def _openssl_tmpdir() -> str:
+    """A private directory for the files openssl reads. One this process cannot create or write is Ap2WriteError (the
+    check could not be run here: exit 74 in the CLI), never a traceback or a check reported as failed (1.5.2: measured
+    13/10/2026 under `ulimit -f 0`, `verify --tsa-cert` on a valid pack raised a traceback, exit 1, and with
+    `--trust-anchor` the artifact was reported as an error, so the pack was "not valid")."""
+    import tempfile
+    try:
+        base = tempfile.gettempdir()   # it probes every candidate by writing a file there
+    except OSError as e:   # its message lists the candidate paths: a reason that would change with the environment
+        raise Ap2WriteError("cannot write a temporary file for openssl: no usable temporary directory") from e
+    try:
+        return tempfile.mkdtemp(prefix="ap2-openssl-", dir=base)
+    except OSError as e:
+        raise _tmp_error(e) from e
+
+
+def _tmp_error(e: OSError) -> "Ap2WriteError":
+    why = os.strerror(e.errno) if isinstance(e.errno, int) else str(e)
+    return Ap2WriteError(f"cannot write a temporary file for openssl: {type(e).__name__}: {why}")
+
+
+def _tmp_write(path: str, data: bytes) -> None:
+    try:
+        with open(path, "wb") as f:
+            f.write(data)
+    except OSError as e:
+        raise _tmp_error(e) from e
+
+
 def _verify_x5c_chain(x5c: List[str], trust_anchor: str, at_time: Optional[str] = None, timeout: int = 15) -> Optional[bool]:
     """Validate the x5c chain to a PEM trust anchor with `openssl verify` (the reference only, like `openssl ts -verify` for
     the TSA — the JS verifier reports `chain_verified: null` and never clears `self_asserted_only`: declared divergence).
@@ -598,11 +627,10 @@ def _verify_x5c_chain(x5c: List[str], trust_anchor: str, at_time: Optional[str] 
     stays fail-closed either way)."""
     import shutil
     import subprocess
-    import tempfile
     exe = shutil.which("openssl")
     if not exe:
         return None          # r9: not measurable here, which is not the same as "the chain failed"
-    d = tempfile.mkdtemp()
+    d = _openssl_tmpdir()
     try:
         def pem(b: bytes) -> bytes:
             body = base64.b64encode(b).decode()
@@ -612,8 +640,7 @@ def _verify_x5c_chain(x5c: List[str], trust_anchor: str, at_time: Optional[str] 
         except Exception:  # noqa: BLE001
             return False
         leaf_path = os.path.join(d, "leaf.pem")
-        with open(leaf_path, "wb") as f:
-            f.write(pem(chain[0]))
+        _tmp_write(leaf_path, pem(chain[0]))
         cmd = [exe, "verify", "-CAfile", trust_anchor]
         if at_time:
             import calendar
@@ -624,11 +651,12 @@ def _verify_x5c_chain(x5c: List[str], trust_anchor: str, at_time: Optional[str] 
                 pass
         if len(chain) > 1:
             unt = os.path.join(d, "untrusted.pem")
-            with open(unt, "wb") as f:
-                f.write(b"".join(pem(c) for c in chain[1:]))
+            _tmp_write(unt, b"".join(pem(c) for c in chain[1:]))
             cmd += ["-untrusted", unt]
         r = subprocess.run(cmd + [leaf_path], capture_output=True, text=True, timeout=timeout)
         return r.returncode == 0 and ": OK" in (r.stdout or "")
+    except Ap2WriteError:
+        raise
     except Exception:  # noqa: BLE001
         return False
     finally:
@@ -797,23 +825,20 @@ def _rfc3161_stamp(digest_hex: str, tsa_url: str, timeout: int = 20) -> Dict:
     never invalidates the evidence — signatures and digests stand on their own."""
     import shutil
     import subprocess
-    import tempfile
     from urllib.parse import urlparse
     if urlparse(tsa_url).scheme not in ("http", "https"):
         return {"anchored": False, "note": "TSA URL scheme not allowed (http/https only)"}
     exe = shutil.which("openssl")
     if not exe:
         return {"anchored": False, "note": "openssl absent (RFC 3161 optional)"}
-    d = tempfile.mkdtemp()
-    try:
-        tsq = os.path.join(d, "q.tsq")
+    try:   # 1.5.2: the query comes from openssl's stdout, not a temporary file (with none writable, tempfile.mkdtemp() raised
+        # outside this try: a traceback, exit 1; measured 13/10/2026 under `ulimit -f 0`)
         r = subprocess.run(
-            [exe, "ts", "-query", "-digest", digest_hex, "-sha256", "-cert", "-out", tsq],
+            [exe, "ts", "-query", "-digest", digest_hex, "-sha256", "-cert"],
             capture_output=True, timeout=timeout)
-        if r.returncode != 0 or not os.path.exists(tsq):
+        if r.returncode != 0 or not r.stdout:
             return {"anchored": False, "note": "openssl ts-query failed"}
-        with open(tsq, "rb") as f:
-            req = f.read()
+        req = r.stdout
         http = urllib.request.Request(tsa_url, data=req, method="POST",
                                       headers={"Content-Type": "application/timestamp-query"})
         with urllib.request.urlopen(http, timeout=timeout) as rh:
@@ -829,9 +854,6 @@ def _rfc3161_stamp(digest_hex: str, tsa_url: str, timeout: int = 20) -> Dict:
         return {"anchored": True, "tsa_url": tsa_url, "tsr_b64": base64.b64encode(resp).decode()}   # 1.4.0: `tsa_url`, the vectors' spelling (`tsa` stays accepted, SPEC §9.1)
     except Exception as e:  # noqa: BLE001
         return {"anchored": False, "note": f"{type(e).__name__}: {str(e)[:80]}"}
-    finally:
-        import shutil as _sh
-        _sh.rmtree(d, ignore_errors=True)
 
 
 def _der_tlv(buf: bytes, off: int) -> Tuple[int, int, int]:
@@ -922,7 +944,6 @@ def _verify_rfc3161(tsr_b64: str, expected_digest_hex: str, timeout: int = 15, t
     fail this one only because `openssl ts -reply -text` refused the minimal DER — neither was a check of the TSA."""
     import shutil
     import subprocess
-    import tempfile
     try:
         tsr = _sigsuite._unb64(tsr_b64)                       # strict base64 (a space inside the token used to be skipped)
     except (ValueError, TypeError):
@@ -942,11 +963,10 @@ def _verify_rfc3161(tsr_b64: str, expected_digest_hex: str, timeout: int = 15, t
     exe = shutil.which("openssl")
     if not exe:
         out["tsa_note"] = "openssl absent — TSA signature/chain NOT verified"; return out
-    d = tempfile.mkdtemp()
+    d = _openssl_tmpdir()
     try:
         path = os.path.join(d, "t.tsr")
-        with open(path, "wb") as f:
-            f.write(tsr)
+        _tmp_write(path, tsr)
         cmd = [exe, "ts", "-verify", "-digest", expected_digest_hex, "-sha256", "-in", path, "-CAfile", tsa_cert]
         if info.get("gen_time"):   # r4: validate the chain at the token's own genTime (`-attime`), so a TSA certificate that expired
             # AFTER issuing does not turn `tsa_verified` False years later; revocation is not checked (declared)
@@ -956,6 +976,8 @@ def _verify_rfc3161(tsr_b64: str, expected_digest_hex: str, timeout: int = 15, t
         out["tsa_verified"] = r.returncode == 0 and "Verification: OK" in (r.stdout or "")
         if not out["tsa_verified"]:   # `verified` keeps its §3.2 meaning (binding); the TSA outcome is its own field, in both verifiers
             out["tsa_note"] = (r.stderr or r.stdout).strip()[-160:]
+    except Ap2WriteError:
+        raise
     except Exception as e:  # noqa: BLE001
         out["tsa_verified"] = False; out["tsa_note"] = f"{type(e).__name__}: {str(e)[:80]}"
     finally:
@@ -1204,7 +1226,9 @@ def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = Fa
                     trust_anchor: Optional[str] = None, min_anchors: Optional[int] = None) -> Dict:
     """OFFLINE re-verification from the evidence file alone: digest, every signature with
     the SNAPSHOTTED key, every disclosure, every binding, and the RFC 3161 token's binding
-    (status + imprint; the TSA itself only with `tsa_cert`, via openssl). Fail-closed."""
+    (status + imprint; the TSA itself only with `tsa_cert`, via openssl). Fail-closed. Raises Ap2WriteError (1.5.2) when
+    a check asked for (`tsa_cert`, `trust_anchor`) cannot be run because openssl's temporary files cannot be written here:
+    no verdict, rather than a check reported as failed."""
     if min_anchors is not None and (type(min_anchors) is not int or min_anchors < 1):   # SPEC §3.3: an integer >= 1 —
         raise ValueError(f"min_anchors must be an integer >= 1 (got {min_anchors!r})")      # 0, NaN or "2" never weakens the policy in silence
     try:
@@ -1345,6 +1369,8 @@ def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = Fa
                       and kb.get("verified") is not False)
             for_bindings.append({"name": a.get("name"), "compact": parsed["compact"],
                                  "resolved_claims": resolved})
+        except Ap2WriteError:   # this process could not run a check (no writable temporary file): not the artifact's error
+            raise
         except Exception as e:  # noqa: BLE001 — any malformation of an artifact is that artifact's error, never a traceback
             art_results.append({"name": a.get("name") if isinstance(a, dict) else None, "error": f"{type(e).__name__}: {str(e)[:120]}"})
             all_ok = False
@@ -1723,9 +1749,12 @@ def _main(argv: Optional[List[str]] = None) -> int:
                 if not sep or not alg or not key:
                     p.error(f"--trusted-producer-key expects ALG=B64 (got {spec!r})")
                 trusted.setdefault(alg, []).append(key)
-        r = verify_evidence(a.evidence, trusted_producer_keys=trusted, require_pq=a.require_pq,
-                            require_producer=a.require_producer, require_anchor=a.require_anchor, tsa_cert=a.tsa_cert,
-                            trust_anchor=a.trust_anchor, min_anchors=min_anchors)
+        try:
+            r = verify_evidence(a.evidence, trusted_producer_keys=trusted, require_pq=a.require_pq,
+                                require_producer=a.require_producer, require_anchor=a.require_anchor, tsa_cert=a.tsa_cert,
+                                trust_anchor=a.trust_anchor, min_anchors=min_anchors)
+        except Ap2WriteError as e:   # a check could not be run here: no verdict, never "not valid"
+            return _not_written(str(e))
         why = _emit(json.dumps(r, indent=1))
         if why is not None:   # 1.5.2: never the verdict's 0/1 when the receipt did not reach stdout whole
             return _not_written(why)
