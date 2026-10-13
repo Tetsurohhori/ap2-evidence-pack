@@ -813,6 +813,75 @@ class TestPackWrittenWholeOrNotAtAll(unittest.TestCase):
         line = "receipt not written: cannot write the pack %r: FileNotFoundError: No such file or directory\n" % out
         self.assertEqual(p.stderr, line.encode("ascii", "backslashreplace"))
 
+    def test_the_temporary_name_is_created_exclusively(self):
+        """The temporary file's name is drawn at random and created O_EXCL: whatever is already at the drawn name — a
+        regular file, a FIFO, a symlink to a file — is neither written, nor followed, nor waited on; the next name is
+        drawn. secrets.token_hex is made to return a planted name first."""
+        for what in ("file", "fifo", "symlink"):
+            with self.subTest(planted=what):
+                sub = tempfile.mkdtemp(dir=self.d)
+                out, victim = os.path.join(sub, "ev.json"), os.path.join(sub, "victim")
+                with open(victim, "wb") as f:
+                    f.write(b"victim")
+                for prefix, call in ((".ap2-pack-", "a.build_evidence(arts, sys.argv[2])"),
+                                     (".identity-", "s.ProducerIdentity.create().save(sys.argv[2])")):
+                    planted = os.path.join(sub, prefix + "0" * 16 + ".tmp")
+                    if what == "file":
+                        with open(planted, "wb") as f:
+                            f.write(b"planted")
+                    elif what == "fifo":
+                        os.mkfifo(planted)
+                    else:
+                        os.symlink(victim, planted)
+                    code = ("import itertools, secrets, sys; sys.path.insert(0, sys.argv[1]); import ap2_evidence as a; "
+                            "from pqcrypto import sigsuite as s; n = itertools.count(0); "
+                            "secrets.token_hex = lambda k=None: format(next(n), '016x'); "
+                            "arts = [{'name': x, 'sd_jwt': open(x + '.sdjwt').read()} for x in ('checkout', 'payment')]\n"
+                            + call + "\n")
+                    p = subprocess.run([sys.executable, "-c", code, _HERE, out], cwd=self.d, capture_output=True, timeout=60)
+                    self.assertEqual(p.returncode, 0, p.stderr)
+                    with open(victim, "rb") as f:
+                        self.assertEqual(f.read(), b"victim")
+                    self.assertTrue(os.path.lexists(planted))
+                    if what == "file":
+                        with open(planted, "rb") as f:
+                            self.assertEqual(f.read(), b"planted")
+                    os.unlink(planted)
+                    self.assertEqual(self._leftovers(sub), [])
+
+    def test_identity_save_whole_or_not_at_all(self):
+        """pqcrypto ProducerIdentity.save wrote a private key file O_TRUNC in place: under RLIMIT_FSIZE a failed save left an
+        earlier key file cut and no longer loadable (measured on 732705d: 223 bytes became 100), and a re-save kept an
+        existing file's mode (0644 stayed 0644). Now: the earlier file intact and loadable, no temporary file left, 0600."""
+        sub = tempfile.mkdtemp(dir=self.d)
+        k = os.path.join(sub, "id.json")
+        code = ("import resource, signal, sys; sys.path.insert(0, sys.argv[1]); from pqcrypto import sigsuite as s\n"
+                "if sys.argv[3] == 'first':\n s.ProducerIdentity.create().save(sys.argv[2])\n"
+                "if sys.argv[3] == 'cut':\n"
+                " signal.signal(signal.SIGXFSZ, signal.SIG_IGN); resource.setrlimit(resource.RLIMIT_FSIZE, (100, 100))\n"
+                " try:\n  s.ProducerIdentity.create().save(sys.argv[2])\n except OSError as e:\n  print(type(e).__name__); sys.exit(3)\n")
+        p = subprocess.run([sys.executable, "-c", code, _HERE, k, "first"], capture_output=True, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(stat.S_IMODE(os.stat(k).st_mode), 0o600)
+        with open(k, "rb") as f:
+            before = f.read()
+        self.assertGreater(len(before), 100)
+        p = subprocess.run([sys.executable, "-c", code, _HERE, k, "cut"], capture_output=True, timeout=60)
+        self.assertEqual(p.returncode, 3, p.stderr)
+        with open(k, "rb") as f:
+            self.assertEqual(f.read(), before)
+        from pqcrypto import sigsuite
+        sigsuite.ProducerIdentity.load(k)
+        self.assertEqual(os.listdir(sub), ["id.json"])
+        os.chmod(k, 0o644)
+        link = os.path.join(sub, "link.json")
+        os.symlink("id.json", link)
+        sigsuite.ProducerIdentity.create().save(link)
+        self.assertTrue(os.path.islink(link))
+        self.assertEqual(stat.S_IMODE(os.stat(k).st_mode), 0o600)
+        with open(k, "rb") as f:
+            self.assertNotEqual(f.read(), before)
+
     def test_sign_evidence_leaves_the_pack_as_it_was_when_it_cannot_write(self):
         sub = tempfile.mkdtemp(dir=self.d)
         out = os.path.join(sub, "ev.json")

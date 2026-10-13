@@ -205,9 +205,50 @@ class ProducerIdentity:
     def save(self, path: str) -> str:
         data = {"format": "cryptovalid-producer-identity/1",
                 "keys": {alg: _priv_to_der_b64(sk) for alg, sk in self._keys.items()}}
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f)
+        # ap2-evidence-pack 1.5.2: whole or not at all, and never readable by others. Before, the file was opened O_TRUNC and
+        # written in place: a write that failed part way (a full disk, `ulimit -f`) left an earlier key file cut and no
+        # longer loadable (measured 13/10/2026: 223 bytes became 100), and an existing file kept its mode (0644 stayed
+        # 0644). Now the key goes to a new file with an unpredictable name, created O_EXCL with mode 0600 in the same
+        # directory, flushed, fsync'd and closed, then renamed onto `path` (a symlink is followed and stays a link); on any
+        # failure the temporary file is removed and the earlier file is left as it was. A path that is not a regular file
+        # (a FIFO, /dev/stdout) is written directly, as before. Raises OSError.
+        import secrets
+        import stat as _stat
+        try:
+            st = os.stat(path)
+        except FileNotFoundError:
+            st = None
+        if st is not None and not _stat.S_ISREG(st.st_mode):
+            if _stat.S_ISDIR(st.st_mode):
+                raise IsADirectoryError(f"{path}: is a directory")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            return path
+        real = os.path.realpath(path)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        while True:
+            tmp = os.path.join(os.path.dirname(real) or ".", ".identity-%s.tmp" % secrets.token_hex(8))
+            try:
+                fd = os.open(tmp, flags, 0o600)
+                break
+            except FileExistsError:
+                continue
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                fd = None
+                json.dump(data, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, real)
+            tmp = None
+        finally:
+            if fd is not None:
+                os.close(fd)
+            if tmp is not None:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
         return path
 
     @classmethod
