@@ -464,7 +464,7 @@ def _cpu_seconds(pid):
     return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
 
 
-def _run_prefilled(cmd, which=1, env=None, cwd=None, other_devfull=False):
+def _run_prefilled(cmd, which=1, env=None, cwd=None, other_devfull=False, other_limit=None):
     """fd `which` (1 = stdout, 2 = stderr) is a NON-BLOCKING pipe that is already full when the process starts, and
     nobody reads it for a while: the process must wait asleep, as on a blocking pipe — still alive, and in some 1-second
     window (looked at from the 1st to the 10th second, so a slow start is not taken for a spin) using under 0.2 s of CPU,
@@ -482,8 +482,12 @@ def _run_prefilled(cmd, which=1, env=None, cwd=None, other_devfull=False):
     other = tempfile.TemporaryFile()
     dest = open("/dev/full", "wb") if other_devfull else other
     try:
+        def pre():   # other_limit: the other stream is a regular file that stops growing at that many bytes
+            if other_limit is not None:
+                import resource
+                resource.setrlimit(resource.RLIMIT_FSIZE, (other_limit, other_limit))
         p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=w if which == 1 else dest,
-                             stderr=w if which == 2 else dest, cwd=cwd, env=dict(os.environ, **(env or {})))
+                             stderr=w if which == 2 else dest, cwd=cwd, env=dict(os.environ, **(env or {})), preexec_fn=pre)
     finally:
         os.close(w)
         if dest is not other:
@@ -594,12 +598,16 @@ class TestWholeOrWaited(unittest.TestCase):
             with self.subTest(input=os.path.basename(path)):
                 self._whole_when_drained([_NODE, _JS, path])
 
-    def _stderr_waited(self, cmd, code, start, stdout_devfull=False):
-        idle, rc, got, out = _run_prefilled(cmd, 2, cwd=self.d, other_devfull=stdout_devfull)
+    def _stderr_waited(self, cmd, code, start, stdout_devfull=False, stdout_limit=None):
+        idle, rc, got, out = _run_prefilled(cmd, 2, cwd=self.d, other_devfull=stdout_devfull, other_limit=stdout_limit)
         self.assertTrue(idle, "no 1-second window under 0.2 s of CPU: a spin, or it never waited")
         self.assertEqual(rc, code, got)
-        self.assertTrue(got is not None and got.startswith(start) and got.endswith(b"\n"), got)
-        self.assertEqual(out, b"")
+        self.assertTrue(got is not None and got.startswith(start) and got.endswith(b"\n")
+                        and (got.count(b"\n") == 1 or not start.startswith(b"receipt not written")), got)
+        if stdout_limit is None:
+            self.assertEqual(out, b"")
+        else:
+            self.assertEqual(len(out), stdout_limit)
 
     def test_full_non_blocking_stderr_is_waited_for_python(self):
         bad = os.path.join(_VEC, "digest_mismatch.json")
@@ -613,6 +621,12 @@ class TestWholeOrWaited(unittest.TestCase):
         self._stderr_waited([_NODE, _JS], 2, b"usage: ")
         self._stderr_waited([_NODE, _JS, "--bogus", _VALID], 2, b"usage: ")
         self._stderr_waited([_NODE, _JS, _VALID], 74, b"receipt not written: ", stdout_devfull=True)
+        # stdout a regular file that stops growing (the receipt written in a loop of writeSync, EFBIG): the line that
+        # says so goes through the same loop, so a full non-blocking stderr is waited for there too
+        self._stderr_waited([_NODE, _JS, self.big], 74, b"receipt not written: EFBIG", stdout_limit=4096)
+
+    def test_the_74_line_after_a_file_that_stops_growing_waits_for_a_full_stderr_python(self):
+        self._stderr_waited(_PY + ["verify", self.big], 74, b"receipt not written: ", stdout_limit=4096)
 
     def test_text_the_caller_left_in_the_buffer_is_waited_for_too(self):
         """main() called in process after the caller wrote text that is still in sys.stdout's buffer, with stdout a
@@ -986,6 +1000,23 @@ class TestOpensslTemporaryFiles(unittest.TestCase):
                 self.assertEqual((rc, out, err), (74, b"", line))
         rc, out, err = self._nproc(_PY + ["verify", os.path.join(_VEC, "anchor_valid.json")])   # no openssl asked for:
         self.assertEqual((rc, err), (0, b""))                                                  # the limit changes nothing
+
+    def test_a_temporary_directory_that_cannot_be_made_is_the_write_error(self):
+        """tempfile.mkdtemp failing after gettempdir passed (no inode left, a directory that stopped taking entries) is the
+        same "cannot write a temporary file for openssl", with the reason and no path in it; made to fail here in process."""
+        import errno
+        import tempfile as _tf
+        real = _tf.mkdtemp
+
+        def full(*a, **k):
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC), "/somewhere/ap2-openssl-x")
+        _tf.mkdtemp = full
+        try:
+            with self.assertRaises(ap2.Ap2WriteError) as cm:
+                ap2.verify_evidence(self.x5c, trust_anchor=self.ca)
+        finally:
+            _tf.mkdtemp = real
+        self.assertEqual(str(cm.exception), "cannot write a temporary file for openssl: OSError: " + os.strerror(errno.ENOSPC))
 
     def test_stamp_query_needs_no_temporary_file(self):
         tsa = _Tsa()
