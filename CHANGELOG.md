@@ -5,13 +5,17 @@
 - `stamp` asks openssl for the RFC 3161 query before it contacts the TSA. Measured on 1.5.2 (`9a85db5`, Python 3.11.2)
   under `RLIMIT_NPROC` 1, where `fork` is refused: `stamp` exited 1, the code of a refusal, with
   `{"error": "no anchor obtained: BlockingIOError: [Errno 11] Resource temporarily unavailable"}`; the pack was left
-  unchanged. Nothing was decided about the pack or the TSA: the query was never made here. Now that openssl, and one
+  unchanged. Nothing was decided about the pack or the TSA: the query was never made here. In 1.5.3 that openssl, and one
   that gives no answer within the timeout, go through the same path as the checks of `verify` (1.5.2): exit 74, one
   line on stderr, `receipt not written: cannot run openssl here: BlockingIOError: Resource temporarily unavailable: not
   stamped`, nothing on stdout, the pack unchanged. A TSA that answers with no token for this digest, or that cannot be
-  reached, is still a refusal, exit 1. `build` with `--tsa` is unchanged: it writes the pack and records the reason as
-  the unanchored note, whose text is now `Ap2WriteError: cannot run openssl here: …`. Test:
-  `test_stamp_whose_openssl_cannot_be_started_is_74_and_the_pack_is_unchanged`, which fails on 1.5.2 (exit 1).
+  reached, is still a refusal, exit 1, as are an openssl absent from the PATH and one that exits with an error for the
+  query (as in 1.5.2). `build` with `--tsa` is unchanged: it writes the pack and records the reason as the unanchored
+  note, whose text is now `Ap2WriteError: cannot run openssl here: …`, as is the note of a further `--tsa` in
+  `anchors_failed`. The README's Versioning section reserves a change of exit codes for 2.0, with the one exception made
+  in 1.5.2 and declared limited to it; 1.5.3 extends that exception to this case, and the section now says so. Test:
+  `test_stamp_whose_openssl_cannot_be_started_is_74_and_the_pack_is_unchanged`, which fails on 1.5.2 (exit 1), with
+  `build` given two `--tsa` and a TSA that cannot be reached in it.
 
 ### Known limitations
 

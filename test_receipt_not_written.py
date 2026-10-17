@@ -1034,6 +1034,20 @@ class TestOpensslTemporaryFiles(unittest.TestCase):
             with open(q, encoding="utf-8") as f:
                 self.assertEqual(json.load(f)["rfc3161_timestamp"], {"anchored": False, "note": "Ap2WriteError: cannot "
                                  "run openssl here: BlockingIOError: Resource temporarily unavailable"})
+            r3 = os.path.join(sub, "ev3.json")   # a further --tsa goes through the same note (anchors_failed), never 74
+            rc, out, err = self._nproc(_PY + ["build", r3, "checkout=" + os.path.join(sub, "checkout.sdjwt"),
+                                              "payment=" + os.path.join(sub, "payment.sdjwt"), "--tsa", tsa.url,
+                                              "--tsa", tsa.url])
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(json.loads(out.decode("ascii"))["anchors_failed"], [{"tsa_url": tsa.url, "note": "Ap2WriteError: "
+                             "cannot run openssl here: BlockingIOError: Resource temporarily unavailable"}])
+            import socket   # the control: a TSA that cannot be reached is still the refusal, exit 1, not a traceback
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", 0))
+                closed = "http://127.0.0.1:%d/" % s.getsockname()[1]
+            rc, out, err = self._run(_PY + ["stamp", p, "--tsa", closed], None)
+            self.assertEqual(rc, 1, err)
+            self.assertTrue(err.startswith(b'{"error": "no anchor obtained: URLError: '), err)
             rc, out, err = self._run(_PY + ["stamp", p, "--tsa", tsa.url], None)   # the control: unlimited, it stamps
             self.assertEqual((rc, err), (0, b""))
             self.assertEqual(json.loads(out.decode("ascii"))["anchors"], 1)
