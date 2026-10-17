@@ -851,9 +851,7 @@ def _rfc3161_stamp(digest_hex: str, tsa_url: str, timeout: int = 20) -> Dict:
         return {"anchored": False, "note": "openssl absent (RFC 3161 optional)"}
     try:   # 1.5.2: the query comes from openssl's stdout, not a temporary file (with none writable, tempfile.mkdtemp() raised
         # outside this try: a traceback, exit 1; measured 13/10/2026 under `ulimit -f 0`)
-        r = subprocess.run(
-            [exe, "ts", "-query", "-digest", digest_hex, "-sha256", "-cert"],
-            capture_output=True, timeout=timeout)
+        r = _run_openssl([exe, "ts", "-query", "-digest", digest_hex, "-sha256", "-cert"], timeout)
         if r.returncode != 0 or not r.stdout:
             return {"anchored": False, "note": "openssl ts-query failed"}
         req = r.stdout
@@ -870,7 +868,17 @@ def _rfc3161_stamp(digest_hex: str, tsa_url: str, timeout: int = 20) -> Dict:
         if not (facts.get("granted") and facts.get("imprint") == digest_hex.lower()):
             return {"anchored": False, "tsa_url": tsa_url, "note": "TSA reply is not a granted token for this digest"}
         return {"anchored": True, "tsa_url": tsa_url, "tsr_b64": base64.b64encode(resp).decode()}   # 1.4.0: `tsa_url`, the vectors' spelling (`tsa` stays accepted, SPEC §9.1)
+    except Ap2WriteError:   # 1.5.3: openssl not started here (fork refused, no descriptor) or silent past `timeout`:
+        raise               # stamp exits 74 with the pack unchanged; build records it as a note (_rfc3161_stamp_noted)
     except Exception as e:  # noqa: BLE001
+        return {"anchored": False, "note": f"{type(e).__name__}: {str(e)[:80]}"}
+
+
+def _rfc3161_stamp_noted(digest_hex: str, tsa_url: str) -> Dict:
+    """build: an anchor that could not be asked for here is the pack's unanchored note, as before 1.5.3."""
+    try:
+        return _rfc3161_stamp(digest_hex, tsa_url)
+    except Ap2WriteError as e:
         return {"anchored": False, "note": f"{type(e).__name__}: {str(e)[:80]}"}
 
 
@@ -1112,14 +1120,14 @@ def build_evidence(artifacts: List[Dict], out_path: str,
     if os.path.isdir(out_path):   # refused before any TSA is asked (the same reason the write itself gives)
         raise Ap2WriteError(f"cannot write the pack {out_path!r}: IsADirectoryError: {os.strerror(errno.EISDIR)}")
     evidence["rfc3161_timestamp"] = (
-        _rfc3161_stamp(evidence["evidence_digest_sha256"], tsa_url)
+        _rfc3161_stamp_noted(evidence["evidence_digest_sha256"], tsa_url)
         if tsa_url else {"anchored": False, "note": "no TSA provided"})
     # 1.5.0 — SPEC §3.3: every further TSA goes to `anchors` (the first stays in rfc3161_timestamp, so a pack built with one
     # TSA is still read by 1.4.x verifiers); an anchor that could not be obtained is NOT written (an entry is a token or
     # nothing) and is reported in the build result
     added, failed = [], []
     for u in extra_tsa_urls or []:
-        st = _rfc3161_stamp(evidence["evidence_digest_sha256"], u)
+        st = _rfc3161_stamp_noted(evidence["evidence_digest_sha256"], u)
         if st.get("anchored"):
             added.append({"mechanism": "rfc3161", "tsr_b64": st["tsr_b64"], "tsa_url": u})
         else:
@@ -1163,7 +1171,10 @@ def add_anchor(path: str, tsa_url: str) -> Dict:
             raise Ap2EvidenceError("the declared evidence_digest_sha256 does not match the sealed content: not stamped")
         if "anchors" in ev and not (isinstance(ev["anchors"], list) and ev["anchors"]):
             raise Ap2EvidenceError("anchors must be a non-empty list (SPEC §3.3): not stamped")
-        st = _rfc3161_stamp(digest, tsa_url)
+        try:   # 1.5.3: measured on 1.5.2 under RLIMIT_NPROC 1: "no anchor obtained: BlockingIOError", a refusal, exit 1
+            st = _rfc3161_stamp(digest, tsa_url)
+        except Ap2WriteError as e:
+            raise Ap2WriteError(f"{e}: not stamped") from e
         if not st.get("anchored"):
             raise Ap2EvidenceError(f"no anchor obtained: {st.get('note')}")
         ev.setdefault("anchors", []).append({"mechanism": "rfc3161", "tsr_b64": st["tsr_b64"], "tsa_url": tsa_url})

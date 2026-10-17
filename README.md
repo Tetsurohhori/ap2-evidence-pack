@@ -61,7 +61,8 @@ count as written: a reader that closes later (`| head -c 100` on a small receipt
 a non-blocking pipe and full is waited for, as a blocking one would be, never reported as lost; in process, text the
 caller left in `sys.stdout`'s buffer goes first and is waited for too. A refusal (1) or a usage message (2) that stderr
 does not take (`2>/dev/full`, `2>&-`) is 74 too, and nothing goes to stdout. After a `stamp` that exits 74, the stderr
-line says which: `cannot write the stamped pack … not stamped` leaves the pack unchanged, any other reason means the pack
+line says which: a reason ending `not stamped` (the pack could not be written, or, since 1.5.3, openssl could not be
+started or did not answer for the query) leaves the pack unchanged, any other reason means the pack
 holds the new anchor and only the receipt was lost (verify the pack before stamping again).
 `build` writes the pack to a new file with an unpredictable name, created exclusively in the same directory, and renames
 it onto the path only when it is whole, so a failed `build` leaves an earlier pack at that path as it was; a path that is
@@ -425,9 +426,11 @@ any legal or regulatory proceeding.
 Within 1.x these do not change: `build_evidence(artifacts, out_path)`, `verify_evidence(path)` → dict with `valid` and,
 when false, `refused`; the CLI `ap2-evidence build|verify` (1.5.0 adds `stamp`) and its exit codes (0 valid or done, 1 not valid or refused, 2 a usage error). Wheel layout,
 dependency floors and new refusals may change in a minor release and the changelog says so. A change to the three above
-is 2.0, with one exception, made in 1.5.2 and limited to it: exit 74 when the receipt, the pack, a refusal or a usage
+is 2.0, with one exception, made in 1.5.2 and extended in 1.5.3 to one case: exit 74 when the receipt, the pack, a refusal or a usage
 message could not be written whole, or when `--tsa-cert` or `--trust-anchor` could not write the temporary files openssl
-reads, could not start openssl or had no answer from it in time (`verify_evidence` then raises `Ap2WriteError`). 1.5.1
+reads, could not start openssl or had no answer from it in time (`verify_evidence` then raises `Ap2WriteError`); in 1.5.3,
+when `stamp` could not start the openssl that makes its query or had no answer from it in time (`add_anchor` raises
+`Ap2WriteError`; 1.5.2 refused it, exit 1). 1.5.1
 exited there with 120, with 1 and a traceback (a valid pack included), with 1 as a refusal (`stamp`) or as "not valid"
 (`--tsa-cert`, `--trust-anchor`), with 0 and `"tsa_verified": false` or `"chain_verified": false` for a check never
 completed (`--tsa-cert` with no anchor policy, `--trust-anchor`; openssl not started or too slow), or with the verdict's

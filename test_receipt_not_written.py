@@ -1002,6 +1002,44 @@ class TestOpensslTemporaryFiles(unittest.TestCase):
         rc, out, err = self._nproc(_PY + ["verify", os.path.join(_VEC, "anchor_valid.json")])   # no openssl asked for:
         self.assertEqual((rc, err), (0, b""))                                                  # the limit changes nothing
 
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "RLIMIT_NPROC does not bind root")
+    def test_stamp_whose_openssl_cannot_be_started_is_74_and_the_pack_is_unchanged(self):
+        """1.5.3 — measured on 1.5.2 under RLIMIT_NPROC 1: `stamp` gave "no anchor obtained: BlockingIOError …", a refusal,
+        exit 1. The query was never made here: exit 74, one line ending "not stamped", the pack as it was. `build` keeps
+        writing the pack with the reason as its unanchored note, and a TSA that answers with no token stays a refusal."""
+        tsa = _Tsa()
+        try:
+            sub = tempfile.mkdtemp(dir=self.d)
+            subprocess.run([sys.executable, os.path.join(_HERE, "examples", "make_samples.py")], cwd=sub, check=True,
+                           capture_output=True)
+            p = os.path.join(sub, "ev.json")
+            rc, _, err = _run(_PY + ["build", p, "checkout=checkout.sdjwt", "payment=payment.sdjwt"], "file", cwd=sub)
+            self.assertEqual(rc, 0, err)
+            with open(p, "rb") as f:
+                before = f.read()
+            rc, out, err = self._nproc(_PY + ["stamp", p, "--tsa", tsa.url])
+            self.assertEqual((rc, out, err), (74, b"", b"receipt not written: cannot run openssl here: BlockingIOError: "
+                                                       b"Resource temporarily unavailable: not stamped\n"))
+            with open(p, "rb") as f:
+                self.assertEqual(f.read(), before)
+            rc, out, err = self._nproc(_PY + ["stamp", p, "--tsa", tsa.url + "html"])   # refused before: still 74, the
+            self.assertEqual(rc, 74, err)                                                # query comes first
+            rc, out, err = self._run(_PY + ["stamp", p, "--tsa", tsa.url + "html"], None)   # the control: a TSA reply
+            self.assertEqual(rc, 1, err)                                                    # with no token stays 1
+            self.assertIn(b"no anchor obtained", err)
+            q = os.path.join(sub, "ev2.json")
+            rc, _, err = self._nproc(_PY + ["build", q, "checkout=" + os.path.join(sub, "checkout.sdjwt"),
+                                            "payment=" + os.path.join(sub, "payment.sdjwt"), "--tsa", tsa.url])
+            self.assertEqual(rc, 0, err)   # build under the same limit: the pack, with the reason as its note
+            with open(q, encoding="utf-8") as f:
+                self.assertEqual(json.load(f)["rfc3161_timestamp"], {"anchored": False, "note": "Ap2WriteError: cannot "
+                                 "run openssl here: BlockingIOError: Resource temporarily unavailable"})
+            rc, out, err = self._run(_PY + ["stamp", p, "--tsa", tsa.url], None)   # the control: unlimited, it stamps
+            self.assertEqual((rc, err), (0, b""))
+            self.assertEqual(json.loads(out.decode("ascii"))["anchors"], 1)
+        finally:
+            tsa.close()
+
     def test_a_temporary_directory_that_cannot_be_made_is_the_write_error(self):
         """tempfile.mkdtemp failing after gettempdir passed (no inode left, a directory that stopped taking entries) is the
         same "cannot write a temporary file for openssl", with the reason and no path in it; made to fail here in process."""

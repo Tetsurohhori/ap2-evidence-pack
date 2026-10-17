@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.5.3 — 2026-10-17 — `stamp` that cannot start openssl is exit 74
+
+- `stamp` asks openssl for the RFC 3161 query before it contacts the TSA. Measured on 1.5.2 (`9a85db5`, Python 3.11.2)
+  under `RLIMIT_NPROC` 1, where `fork` is refused: `stamp` exited 1, the code of a refusal, with
+  `{"error": "no anchor obtained: BlockingIOError: [Errno 11] Resource temporarily unavailable"}`; the pack was left
+  unchanged. Nothing was decided about the pack or the TSA: the query was never made here. Now that openssl, and one
+  that gives no answer within the timeout, go through the same path as the checks of `verify` (1.5.2): exit 74, one
+  line on stderr, `receipt not written: cannot run openssl here: BlockingIOError: Resource temporarily unavailable: not
+  stamped`, nothing on stdout, the pack unchanged. A TSA that answers with no token for this digest, or that cannot be
+  reached, is still a refusal, exit 1. `build` with `--tsa` is unchanged: it writes the pack and records the reason as
+  the unanchored note, whose text is now `Ap2WriteError: cannot run openssl here: …`. Test:
+  `test_stamp_whose_openssl_cannot_be_started_is_74_and_the_pack_is_unchanged`, which fails on 1.5.2 (exit 1).
+
+### Known limitations
+
+- A run under a file size limit can leave Python's own bytecode cache cut (measured 2026-10-13 on 1.5.2,
+  `9a85db5`). CPython 3.9 and 3.11 write each `.pyc` with one raw write: from a copy without `__pycache__`, one run
+  under a limit smaller than a `.pyc` left it cut — `python3 ap2_evidence.py verify` cut `pqcrypto/sigsuite`'s
+  (13 628 bytes on 3.9.25, cut under limits of 1 to 4 KiB, whole under 16 KiB; 25 347 bytes on 3.11.2, cut under
+  16 KiB too), and `python -m ap2_evidence` also cut `ap2_evidence`'s own (81 795 and 144 498 bytes) — and every
+  later run exited 1 with `EOFError: marshal data too short`. The failure is loud — no verdict and no exit code of
+  a verdict comes from a cut file — and lasts until `__pycache__` (and `pqcrypto/__pycache__`) is removed, or is
+  avoided with `python -B` or `PYTHONDONTWRITEBYTECODE=1`. Python 3.13.15 wrote no cut file in the same runs; a cut
+  file put there stops it as well. A wheel installed with pip's default settings has its `.pyc` compiled at install
+  time.
+
 ## 1.5.2 — 2026-10-13 — a receipt that was not written is exit 74
 
 Both CLIs computed the outcome, wrote the receipt to stdout and exited with the verdict's code without checking that the
