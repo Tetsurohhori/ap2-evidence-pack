@@ -267,8 +267,10 @@ function verifyProducerBlock(block, message, trusted) {
   // 1.4.0 — SPEC §5/§9.1: `scheme` reconciled with the entries ("hybrid" = a classical AND an ml-dsa-65 entry; "classical-only" = no ml-dsa-65)
   const algs = results.map((r) => r.sig_alg); const hasPq = algs.includes("ml-dsa-65"), hasClassical = algs.some((a) => a === "ed25519" || a === "ecdsa-p256");
   const schemeOk = (block?.scheme === "hybrid" && hasPq && hasClassical) || (block?.scheme === "classical-only" && !hasPq);
-  const ok = nPass >= 1 && nFail === 0 && nSkip === 0 && schemeOk; const trustedOk = trusted === null ? null : (results.length > 0 && allPinned && nSkip === 0);
-  return { ok, incomplete: nSkip > 0 && nFail === 0, pq_protected: pq, trusted: trustedOk, results, scheme_ok: schemeOk };
+  const ok = nPass >= 1 && nFail === 0 && nSkip === 0 && schemeOk;
+  // 1.5.4 — SPEC §5: a block that is not ok states neither trust (null) nor post-quantum protection (false), as the reference
+  const trustedOk = trusted === null || !ok ? null : allPinned;
+  return { ok, incomplete: nSkip > 0 && nFail === 0, pq_protected: pq && ok, trusted: trustedOk, results, scheme_ok: schemeOk };
 }
 // ---- RFC 3161 token: minimal DER walk — TimeStampResp{ status PKIStatusInfo{ INTEGER }, timeStampToken ContentInfo{ OID, [0] SignedData{ ..., encapContentInfo{ OID id-ct-TSTInfo, [0] OCTET STRING TSTInfo } } } }
 // TSTInfo{ version, policy OID, messageImprint{ AlgorithmIdentifier, OCTET STRING hash } ... }. Same two facts the reference checks

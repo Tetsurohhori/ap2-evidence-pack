@@ -17,5 +17,8 @@
  "policy": {
   "min_anchors": 2
  },
+ "requires_backend": [
+  "ml-dsa-65"
+ ],
  "vector": "anchors_two_valid"
 }

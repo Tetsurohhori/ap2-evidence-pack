@@ -1,5 +1,57 @@
 # Changelog
 
+## 1.5.4 — 2026-10-18 — a producer block that does not verify states no trust and no post-quantum protection
+
+Points 2–5 below come from an independent clean-room verifier by @Tetsurohhori (aos-standard/catalog 556b982), written
+from the SPEC text, which agreed with the 26 vectors of 1.5.3 and named the choices the text had left to its reader —
+points 2, 3 and 4 are three of them; point 5 is what that verifier does with `pq_protected` (read in its code, not named
+by it); point 1 from the measurement of the same verifier on a host whose OpenSSL has no ML-DSA-65.
+
+1. **`requires_backend` (SPEC §7).** On a host with OpenSSL 3.0.22 that verifier agreed on 14 of the 26 vectors of 1.5.3
+   (measured 2026-10-18): the other 12 are exactly the vectors whose verdict needs an ML-DSA-65 signature checked, and
+   nothing in their `.expected.json` said so, so a verifier without the backend saw disagreements where the SPEC
+   (§6 step 6) asks for SKIP. Those 12 now carry `"requires_backend": ["ml-dsa-65"]`. Which 12 is measured, not chosen:
+   the reference run on every vector with and without its backend (`make_vectors_154.py --declare-backend`;
+   `test_requires_backend_is_the_measured_dependence` repeats it). `run_ap2_conformance.py` counts them SKIP when the
+   backend is absent (without it: 17 PASS, 12 SKIP, conformant) and reads the expected files as a closed format: an
+   unknown key, policy key, report key or backend name, a policy value of the wrong type, a file that is not UTF-8 JSON
+   or repeats a key, and a pack without its expected file (or the reverse) are errors of the vector set, exit 2, never
+   ignored and never a verifier's FAIL. The key is
+   new rather than a value of `requires`, which runners — ours and that verifier's — read as names of executables: a
+   1.5.3 runner ignores `requires_backend`, and the same verifier's runner, unchanged, gives 17/29 on the OpenSSL 3.0
+   host (12 disagreements, as before) and, with a two-line backend clause, 17 agree and 12 SKIP.
+2. **Order in an `anchors` entry (SPEC §3.3).** For an entry with an undefined mechanism, the refusal naming the
+   mechanism comes before the §9.1 scan of that mechanism's keys (there is no key list for an undefined mechanism).
+   Both verifiers already did this; the vector `anchors_unknown_mechanism` pins it (with the two checks swapped in a
+   copy of the 1.5.3 reference, it is the one vector that fails). Text only.
+3. **`bindings_ok` (SPEC §6 step 3)** is `false` when any artifact fails, whatever `bindings` holds, `[]` included.
+   Both verifiers already did this; `header_crit_unknown` and `kb_jwt_typ_missing` (`bindings: []`) pin it (with the
+   rule removed from a copy of the 1.5.3 Python and JS verifiers, both vectors fail in each). Text only.
+4. **`producer_trusted` on a block that is not `ok` (SPEC §5)** is `null`, pinned set given or not: a block that did not
+   verify carries no trust statement. 1.5.3 (measured on the reference) reported `true` when every key was pinned and
+   the block was not `ok` because an entry failed or `scheme` did not match the entries; `false` when a key was not
+   pinned, when an entry was SKIP (an unknown `sig_alg`, or the ML-DSA-65 entry on a verifier without that backend, where
+   1.5.4 turns `false` into `null` on every pinned hybrid pack, `valid_signed` included, `valid` `false` in both) or when the
+   block held no entry. Vector `producer_mldsa_fails_pinned`.
+5. **`pq_protected` on a block that is not `ok` (SPEC §5)** is `false`. 1.5.3 reported `true` whenever the block held a
+   valid ML-DSA-65 signature whose key was pinned (or no pinned set was given), whatever made the block not `ok` — a failing classical entry, a `scheme` that did
+   not match the entries, a SKIP entry (measured on the reference); and where `producer_trusted` was also `true` (every key
+   pinned, the block failing through an entry or its `scheme`) `require_pq` was met and `policy_ok` was `true`.
+   Vectors `producer_classical_fails_pinned` (pinned, `require_pq`) and `producer_classical_fails_unpinned`.
+
+**Points 4 and 5 change field values only on packs that were already not `valid`**: a producer block that is not `ok`
+makes the pack not `valid` (§6 step 8) in 1.5.3 as in 1.5.4, and `valid` is unchanged on every case measured. The
+fields that change are `producer_trusted`, `pq_protected` and, under `require_pq`, `policy_ok`. Measured: with an ML-DSA-65
+backend the 1.5.3 verifiers (Python and JS) disagree with the three new vectors (0/3 each; the 1.5.3 reference without
+the backend agrees with `producer_classical_fails_unpinned` and reports `false`, not `true`, on the other two); the differential oracle with the 1.5.3 JS
+verifier against the 1.5.4 reference reports 10 of 172 cases — the three vectors and seven hostile producer blocks — and
+`valid` is `false` in both on all ten. `verify_producer_block` (`pqcrypto/sigsuite.py`, shipped as `ap2_pqcrypto/sigsuite.py`) returns the same keys;
+callers that read its `trusted`/`pq_protected` on a block that is not `ok` see `None`/`False`.
+
+Vector set: 29 (7 ACCEPT, 22 REJECT). The three new vectors are derived from `valid_signed.json` by changing one byte
+of one producer signature and regenerate byte for byte (`make_vectors_154.py`); none of them needs an ML-DSA-65
+backend under 1.5.4 (measured: they pass with and without it).
+
 ## 1.5.3 — 2026-10-17 — `stamp` that cannot start openssl is exit 74
 
 - `stamp` asks openssl for the RFC 3161 query before it contacts the TSA. Measured on 1.5.2 (`9a85db5`, Python 3.11.2)

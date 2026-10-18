@@ -1,11 +1,15 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- Copyright 2026 Roberto Locatelli -->
 
-# ap2-evidence-pack — normative format v1.0 (2026-09-05), specification revision 1.5.0 (2026-10-11)
+# ap2-evidence-pack — normative format v1.0 (2026-09-05), specification revision 1.5.4 (2026-10-18)
 
 Status: **proposed format** (no standards body; normative for this repository), defined by the conformance vectors in
 `spec/vectors/ap2/` (each `<name>.json` pack + `<name>.expected.json`
-policy/verdict). Revision 1.5.0 adds §3.3: `anchors`, a closed list of additional time anchors outside the
+policy/verdict). Revision 1.5.4 writes down two rules both verifiers already followed and the text did not state — the
+order of the checks of an `anchors` entry (§3.3) and `bindings_ok` when an artifact fails (§6 step 3) —; changes what
+§5 reports on a producer block that is not `ok` (`producer_trusted`, `pq_protected`, and so `policy_ok` under
+`require_pq`: field values of packs that were already not `valid`, whose `valid` does not change); and lets an expected
+file declare the cryptographic backend its verdict needs (`requires_backend`, §7). Revision 1.5.0 adds §3.3: `anchors`, a closed list of additional time anchors outside the
 digest, so one pack can carry more than one commitment to the same digest (a pack with `anchors` needs a 1.5.0 verifier:
 1.4.x refuses the unknown top-level key, as §9 requires). Revision 1.4.0 adds §9, the CLOSED SCHEMA: every object this format defines
 has an exhaustive key list, and a key outside it is a refusal with a reason — never silently
@@ -167,6 +171,11 @@ refusal (§9.1). `anchors` is the place for them.
   `"rfc3161"`, with `tsr_b64` (string, MUST: strict base64 of a DER TimeStampResp), `tsa_url` (string) and `note`
   (string). A `mechanism` this revision does not define is a refusal naming it — never skipped: a verifier that cannot
   check an anchor must not let the pack look as if it had one. A new mechanism is a new revision of this text.
+  Order (1.5.4): each entry is checked in list order — not an object, then `mechanism` missing, then not a string, then
+  not defined here (the refusal naming it), and only then the §9.1 scan of that mechanism's keys. The keys of an entry
+  are listed PER MECHANISM, so for an undefined mechanism there is no list to scan against: an entry with an undefined
+  mechanism and a key unknown to `rfc3161` is refused for its mechanism, not for the key (vector
+  `anchors_unknown_mechanism`).
 - Every `rfc3161` entry is checked exactly as §3.2 checks the `rfc3161_timestamp` token, against the RECOMPUTED digest:
   `verified`, `granted`, `imprint_ok`, `gen_time`, `tsa_verified` (`--tsa-cert` takes a PEM file that may hold the
   certificates of several TSAs). A claimed entry whose binding fails rejects the pack, like a failing
@@ -252,6 +261,15 @@ present signature's key is pinned; a valid-but-unpinned signature MUST reject
 the pack even with no policy flags set. Without a pinned set `producer_trusted`
 is `null` and the pack MUST NOT be treated as authentic. `pq_protected` is true
 only on a valid ML-DSA-65 signature whose key is pinned (or no pin set given).
+1.5.4: both are statements about a block that verified. When the block is not `ok`, `producer_trusted` is `null`
+(pinned set given or not) and `pq_protected` is `false` (a valid pinned ML-DSA-65 entry beside a failing entry
+included); so `require_pq` (§6 step 6) is never met by a block that is not `ok`. Such a pack is not `valid` (§6 step
+8, unchanged): 1.5.3 (measured on `f03abbc`) reported `producer_trusted` `true` when every key was pinned and the block
+failed through an entry or its `scheme`, `false` when the block held a SKIP entry or no entry, `pq_protected` `true` on
+any block holding a valid ML-DSA-65 entry whose key was pinned (or no pinned set), and so, under `require_pq`, `policy_ok`
+`true` where both were `true` (vectors
+`producer_mldsa_fails_pinned`,
+`producer_classical_fails_pinned`, `producer_classical_fails_unpinned`).
 
 ## 6. Verification algorithm and verdict (NORMATIVE)
 
@@ -287,7 +305,10 @@ flags: `require_producer`, `require_pq`, `require_anchor`, and `min_anchors` (1.
    any of them is that artifact's error, whatever `cnf` says). A verifier records the
    KB-JWT `aud`/`nonce`/`iat` as present-but-not-validated, as the sealed scope states: their expected
    values are transaction context an offline verifier cannot know.
-3. Recompute bindings (§4), compare → `bindings_ok`.
+3. Recompute bindings (§4), compare → `bindings_ok`. 1.5.4: `bindings_ok` is `false` when ANY artifact fails step 2
+   (an artifact error or a refusal), whatever `bindings` holds, `[]` included — the recomputation needs every
+   artifact's verified claims, and an artifact that did not verify has none (vectors `header_crit_unknown`,
+   `kb_jwt_typ_missing`: `bindings: []`, `bindings_ok: false`).
 4. If `rfc3161_timestamp.anchored`: check the token's binding (§3.2) — status
    granted AND messageImprint == the **recomputed** digest → `rfc3161_verified`
    true/false (this needs no tooling: a DER walk). The TSA's signature and chain are
@@ -339,20 +360,35 @@ true/false/null), and since 1.5.0 `anchors_verified` (an integer, §3.3).
 Run every `spec/vectors/ap2/<name>.json` under the policy in
 `<name>.expected.json` and reproduce the `normative` block exactly
 (`run_ap2_conformance.py` does this for the reference; exit 0 = conformant).
-The set contains seven ACCEPTs (`valid_signed` — positive control — and `anchor_valid`,
+The set contains twenty-nine vectors: seven ACCEPTs (`valid_signed` — positive control — and `anchor_valid`,
 a real RFC 3161 token from a probe TSA whose certificate ships beside it; since 1.4.0 also
 `header_param_ignored`, a signed header with an unregistered parameter that RFC 7515 §4 says to
 ignore, `kb_jwt_valid`, a holder-bound mandate whose KB-JWT verifies, and `key_jwk_member_ignored`,
 a snapshotted JWK with an unregistered member; since 1.5.0 `anchors_two_valid`, two distinct anchors
-under `min_anchors` 2, and `anchors_only`, an anchor carried only in `anchors`) and nineteen
+under `min_anchors` 2, and `anchors_only`, an anchor carried only in `anchors`) and twenty-two
 REJECTs (stripped-signature downgrade, valid-but-unpinned producer, digest mismatch,
 anchor required-but-missing, anchor claimed-but-invalid, a real token for another digest; since
 1.4.0: an unknown key at the top level, inside `rfc3161_timestamp`, inside an artifact entry and
 inside a producer-signature entry, a `crit` header parameter the verifier does not understand, and
 a KB-JWT without the `kb+jwt` type; since 1.5.0 (§3.3): a copied token counted once, one anchor under
 `min_anchors` 2, an `anchors` entry whose token is not a TimeStampResp, a real token for another
-digest in `anchors`, an unknown mechanism, an unknown key in an entry, an empty `anchors`). A vector
-whose `requires` tooling is absent is reported SKIP, honestly unverified. When an
+digest in `anchors`, an unknown mechanism, an unknown key in an entry, an empty `anchors`; since 1.5.4 (§5) a pinned
+block whose ML-DSA-65 signature fails, a pinned block whose classical signature fails under `require_pq`, and the same
+bytes with no pinned set). A vector
+whose `requires` tooling is absent is reported SKIP, honestly unverified. 1.5.4: `requires_backend` lists the
+cryptographic backends without which a verifier cannot reproduce the vector's `normative` block; this revision defines
+one, `"ml-dsa-65"` (a verifier that can check FIPS 204 ML-DSA-65 — the receipt's `mldsa_backend`, §6 step 6). A verifier
+without that backend reports such a vector SKIP — not a disagreement and never a pass — and does not claim conformance on
+it. Twelve vectors carry it; which ones is MEASURED, not chosen: the reference verifier is run on every vector with and
+without its ML-DSA-65 backend, and the vectors it reproduces only with the backend are the ones marked
+(`make_vectors_154.py --declare-backend`; the test suite repeats the measurement). The expected files are a closed
+format: keys `vector`, `description`, `policy`, `normative` (all twelve fields), `report` (`ignored`, `refused`),
+`requires`, `requires_backend` (`"ml-dsa-65"`); `policy` keys `trusted_producer_keys`, `require_pq`, `require_producer`,
+`require_anchor`, `min_anchors`, with the types of §6 (`require_*` booleans, `min_anchors` a positive integer,
+`trusted_producer_keys` null or an object mapping a `sig_alg` to a key or a non-empty list of keys). A runner that meets
+any other key, backend name or policy type, a file that is not UTF-8 JSON or repeats a key, or a pack without its
+expected file (or the reverse) stops with an error of the vector set, never ignoring it (`run_ap2_conformance.py`:
+exit 2). When an
 `<name>.expected.json` carries a `report` block, a conformant verifier also reproduces it: today it
 holds `ignored`, the per-artifact list of names ignored under a standard's rule (§9.2), mapped
 onto the reference receipt's `artifacts[i].ignored`; since 1.5.0 it may also hold `refused`, the EXACT

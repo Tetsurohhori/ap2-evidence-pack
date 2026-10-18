@@ -71,6 +71,36 @@ class TestSigSuite(unittest.TestCase):
             r2 = S.verify_producer_block(dict(blk, signatures=[bad] + blk["signatures"][1:]), msg)
             self.assertFalse(r2["ok"]); self.assertEqual(r2["results"][0]["status"], "FAIL")
 
+    def test_failed_block_states_no_trust_and_no_pq(self):
+        """1.5.4 — SPEC §5: on a block that is not ok, `trusted` is None (pins or not) and `pq_protected` False. 1.5.3 gave
+        trusted True with every key of a failing block pinned, and pq_protected True on a valid pinned ML-DSA-65 entry
+        beside a failing classical one."""
+        msg = b"pack-digest"
+        blk = S.sign_hybrid(msg)
+        pins = {s["sig_alg"]: [s["public_key_b64"]] for s in blk["signatures"]}
+        def broken(pq):
+            out = []
+            for s in blk["signatures"]:
+                if s["post_quantum"] is pq:
+                    raw = bytearray(base64.b64decode(s["signature_b64"])); raw[0] ^= 1
+                    s = dict(s, signature_b64=base64.b64encode(bytes(raw)).decode())
+                out.append(s)
+            return dict(blk, signatures=out)
+        ok = S.verify_producer_block(blk, msg, trusted=pins)
+        self.assertTrue(ok["ok"] and ok["pq_protected"]); self.assertIs(ok["trusted"], True)   # positive control
+        for pq_broken in (True, False):
+            for pin in (pins, None):
+                r = S.verify_producer_block(broken(pq_broken), msg, trusted=pin)
+                self.assertFalse(r["ok"]); self.assertIsNone(r["trusted"]); self.assertIs(r["pq_protected"], False)
+        # the ML-DSA entry of the classical-broken block still verifies and is pinned: only the block decides
+        r = S.verify_producer_block(broken(False), msg, trusted=pins)
+        self.assertEqual([x["status"] for x in r["results"]], ["FAIL", "PASS"])
+        # an ok block with an unpinned key is still trusted False (unchanged)
+        other = S.sign_hybrid(msg)
+        self.assertIs(S.verify_producer_block(other, msg, trusted=pins)["trusted"], False)
+        # an EMPTY pinned set is a pinned set (nothing is trusted), not "no pinned set": False on an ok block, never None
+        self.assertIs(S.verify_producer_block(blk, msg, trusted={})["trusted"], False)
+
 
 class TestAp2ProducerSignature(unittest.TestCase):
     def setUp(self):

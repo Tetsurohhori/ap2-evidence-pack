@@ -30,5 +30,8 @@
  "requires": [
   "openssl"
  ],
+ "requires_backend": [
+  "ml-dsa-65"
+ ],
  "vector": "anchor_invalid"
 }

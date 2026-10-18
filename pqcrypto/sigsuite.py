@@ -11,8 +11,8 @@
 #   ml-dsa-65    POST-QUANTUM, FIPS 204 (NIST)                    — 1952B key / ~3309B sig
 #
 # ML-DSA is provided by the AUDITED `cryptography` library (>=50.0.1), never home-grown.
-# A HYBRID pack carries a classical + a PQ signature: it is `pq_protected` when a valid
-# ML-DSA signature is present, so the pack's integrity/authenticity survives the quantum
+# A HYBRID pack carries a classical + a PQ signature: it is `pq_protected` when a valid (and, with a pinned set, pinned)
+# ML-DSA signature is present in a block that verifies (1.5.4: never on a block that is not ok), so the pack's integrity/authenticity survives the quantum
 # transition (NIST IR 8547: deprecate classical ~2030, disallow ~2035 — inside a window
 # opened today). Honest scope: a PQ signature protects THIS pack's integrity/authenticity;
 # it does not retro-protect an underlying classical mandate signature, and does not confer
@@ -313,14 +313,15 @@ def sign_hybrid(message: bytes, classical_alg: str = "ed25519") -> Dict:
 
 def verify_producer_block(block: Dict, message: bytes, trusted: Optional[Dict[str, str]] = None) -> Dict:
     """Verify every producer signature. Fail-closed: any present-but-invalid signature
-    makes the block invalid. `pq_protected` is true only on a VALID ML-DSA signature.
+    makes the block invalid. `pq_protected` is true only on a VALID ML-DSA signature in a block that is ok (1.5.4).
 
     `trusted` = {sig_alg: public_key_b64} (or {sig_alg: [b64,...]}) PINS the producer key.
     Without it, a valid signature proves only INTERNAL CONSISTENCY, never authenticity
     (an attacker can re-sign tampered content with a fresh embedded key) -> `trusted` is
     reported None and callers MUST NOT treat the pack as authentic. With it, `trusted` is
     True only when every present signature's key is pinned, and `pq_protected` additionally
-    requires the ML-DSA key to be pinned."""
+    requires the ML-DSA key to be pinned. 1.5.4: on a block that is not ok `trusted` is None
+    (pinned set or not) and `pq_protected` is False — no statement about a block that failed."""
     results, pq = [], False
     all_keys_pinned = trusted is not None
     n_pass = n_fail = n_skip = 0
@@ -367,6 +368,11 @@ def verify_producer_block(block: Dict, message: bytes, trusted: Optional[Dict[st
     scheme = block.get("scheme") if isinstance(block, dict) else None
     scheme_ok = (scheme == "hybrid" and has_pq and has_classical) or (scheme == "classical-only" and not has_pq)
     ok = n_pass >= 1 and n_fail == 0 and n_skip == 0 and scheme_ok
-    trusted_ok = None if trusted is None else (bool(results) and all_keys_pinned and n_skip == 0)
+    # 1.5.4 — SPEC §5: a block that is not ok states neither trust nor post-quantum protection. 1.5.3 reported `trusted`
+    # true when every key of a FAILING block was pinned, and `pq_protected` true on a valid pinned ML-DSA-65 signature
+    # beside a failing classical one (so `require_pq` was met on such a pack, which stayed not valid). Measured with the
+    # vectors producer_mldsa_fails_pinned / producer_classical_fails_pinned / producer_classical_fails_unpinned.
+    pq = pq and ok
+    trusted_ok = None if (trusted is None or not ok) else all_keys_pinned   # ok implies a PASS, no SKIP, no FAIL entry
     return {"ok": ok, "incomplete": n_skip > 0 and n_fail == 0, "pq_protected": pq,
             "trusted": trusted_ok, "results": results, "scheme": scheme, "scheme_ok": scheme_ok}

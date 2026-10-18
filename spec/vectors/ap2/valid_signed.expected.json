@@ -27,5 +27,8 @@
    ]
   }
  },
+ "requires_backend": [
+  "ml-dsa-65"
+ ],
  "vector": "valid_signed"
 }

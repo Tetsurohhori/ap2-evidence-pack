@@ -10,6 +10,7 @@ import json
 import glob
 import os
 import shutil
+import subprocess
 import tempfile
 import sys
 import unittest
@@ -27,7 +28,7 @@ class TestAp2ConformanceVectors(unittest.TestCase):
         r = rc.run()
         self.assertTrue(r["conformant"], r)
         statuses = {x["vector"]: x["status"] for x in r["results"]}
-        self.assertEqual(len(statuses), 26, statuses)   # 1.1.0: + anchor_valid (real token, probe TSA) and anchor_wrong_digest; 1.4.0: + 9 closed-schema vectors (SPEC §9); 1.5.0: + 9 anchors vectors (SPEC §3.3)
+        self.assertEqual(len(statuses), 29, statuses)   # 1.1.0: + anchor_valid (real token, probe TSA) and anchor_wrong_digest; 1.4.0: + 9 closed-schema vectors (SPEC §9); 1.5.0: + 9 anchors vectors (SPEC §3.3); 1.5.4: + 3 producer-block vectors (SPEC §5)
         self.assertEqual(statuses.get("kb_jwt_valid"), "PASS", statuses)   # 1.4.0: the KB-JWT positive control
         # the set must contain the positive control — an always-reject verifier must fail
         self.assertEqual(statuses.get("valid_signed"), "PASS", statuses)
@@ -359,10 +360,159 @@ class TestAp2ConformanceVectors(unittest.TestCase):
                 flags += ["--min-anchors", str(min_anchors)]
             out = subprocess.run(["node", os.path.join(_HERE, "verifiers", "js", "ap2-verify.mjs"), path] + flags, capture_output=True, text=True)
             return json.loads(out.stdout)
-        r = rc.run(verify_fn=js_verify)
+        r = rc.run(verify_fn=js_verify, backends={"ml-dsa-65": True})   # the probe above: this Node checks ML-DSA-65
         self.assertTrue(r["conformant"], r)
-        self.assertEqual(len(r["results"]), 26)   # 1.5.0: + 9 anchors vectors
+        self.assertEqual(len(r["results"]), 29)   # 1.5.0: + 9 anchors vectors; 1.5.4: + 3 producer-block vectors
+        self.assertEqual([x for x in r["results"] if x["status"] != "PASS"], [])   # nothing SKIP: every vector measured
 
+
+
+class TestExpectedFilesAndBackend(unittest.TestCase):
+    """1.5.4 — SPEC §7: `requires_backend` is the MEASURED dependence of each vector on an ML-DSA-65 backend, a verifier
+    without the backend counts those vectors SKIP (not FAIL, never PASS), and the expected files are a closed format."""
+    VDIR = os.path.join(_HERE, "spec", "vectors", "ap2")
+
+    def _copy(self):
+        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d)
+        for f in os.listdir(self.VDIR):
+            if f.endswith(".json") or f.endswith(".crt"):
+                shutil.copy(os.path.join(self.VDIR, f), d)
+        return d
+
+    def test_requires_backend_is_the_measured_dependence(self):
+        import run_ap2_conformance as rc
+        import make_vectors_154 as mv
+        if not ap2._sigsuite.MLDSA_AVAILABLE:
+            self.skipTest("no ML-DSA-65 backend here: the dependence cannot be measured")
+        declared = sorted(json.load(open(p, encoding="utf-8"))["vector"] for p in glob.glob(os.path.join(self.VDIR, "*.expected.json"))
+                          if "requires_backend" in json.load(open(p, encoding="utf-8")))
+        self.assertEqual(declared, mv.measured_backend_dependence())
+        self.assertEqual(len(declared), 12, declared)
+        self.assertTrue(ap2._sigsuite.MLDSA_AVAILABLE)   # the measurement restored the backend
+
+    def test_without_the_backend_the_marked_vectors_are_skip_and_the_rest_pass(self):
+        import run_ap2_conformance as rc
+        saved = ap2._sigsuite.MLDSA_AVAILABLE
+        ap2._sigsuite.MLDSA_AVAILABLE = False
+        try:
+            r = rc.run()
+            st = {x["vector"]: x["status"] for x in r["results"]}
+            self.assertTrue(r["conformant"], r)
+            self.assertEqual(sum(v == "SKIP" for v in st.values()), 12, st)
+            self.assertEqual(sum(v == "PASS" for v in st.values()), 17, st)
+            # the bench can fail: the same run with one marker removed reports that vector FAIL, not SKIP
+            d = self._copy(); p = os.path.join(d, "valid_signed.expected.json")
+            e = json.load(open(p, encoding="utf-8")); del e["requires_backend"]; json.dump(e, open(p, "w", encoding="utf-8"))
+            r2 = rc.run(vector_dir=d)
+            self.assertFalse(r2["conformant"])
+            self.assertEqual([x["vector"] for x in r2["results"] if x["status"] == "FAIL"], ["valid_signed"])
+        finally:
+            ap2._sigsuite.MLDSA_AVAILABLE = saved
+
+    def test_expected_files_are_closed(self):
+        import run_ap2_conformance as rc
+        d = self._copy()
+        self.assertTrue(rc.run(vector_dir=d)["conformant"])   # positive control: the unchanged copy passes
+        p = os.path.join(d, "digest_mismatch.expected.json"); orig = json.load(open(p, encoding="utf-8"))
+        for mut in (lambda e: e.__setitem__("requires_mldsa", True), lambda e: e.__setitem__("requires_backend", ["ml-dsa-87"]),
+                    lambda e: e.__setitem__("requires_backend", []), lambda e: e.__setitem__("requires_backend", "ml-dsa-65"),
+                    lambda e: e["policy"].__setitem__("require_pqc", True), lambda e: e["normative"].__setitem__("mldsa_backend", True),
+                    lambda e: e["normative"].pop("anchors_verified"), lambda e: e.__setitem__("report", {"refusal": "x"}),
+                    lambda e: e.__setitem__("vector", "another"), lambda e: e.__setitem__("requires", ["openssl", "openssl"])):
+            e = json.loads(json.dumps(orig)); mut(e); json.dump(e, open(p, "w", encoding="utf-8"))
+            with self.assertRaises(rc.VectorSetError):
+                rc.run(vector_dir=d)
+        json.dump(orig, open(p, "w", encoding="utf-8"))
+        self.assertTrue(rc.run(vector_dir=d)["conformant"])
+
+    def test_broken_vector_set_is_exit_2_not_a_fail(self):
+        # NEMESIS 1.5.4: a broken expected file was a traceback (exit 1, read as "not conformant"), a repeated key kept its
+        # last value in silence, a policy "false" string was require_pq true, a missing pack was the verifier's FAIL
+        import run_ap2_conformance as rc
+        d = self._copy(); p = os.path.join(d, "digest_mismatch.expected.json"); raw = open(p, encoding="utf-8").read()
+        pack = os.path.join(d, "digest_mismatch.json")
+        self.assertTrue(rc.run(vector_dir=d)["conformant"])   # positive control
+        def restore():
+            if os.path.isdir(p) and not os.path.islink(p): os.rmdir(p)
+            elif os.path.lexists(p): os.remove(p)
+            open(p, "w", encoding="utf-8").write(raw)
+        e = json.loads(raw)
+        cases = {
+            "truncated": lambda: open(p, "w").write(raw[:-5]),
+            "not utf-8": lambda: open(p, "wb").write(raw.encode().replace(b'"description": "', b'"description": "\xff', 1)),
+            "repeated key": lambda: open(p, "w").write(raw.rstrip()[:-1] + ', "requires_backend": ["ml-dsa-87"], "requires_backend": ["ml-dsa-65"]}'),
+            "directory": lambda: (os.remove(p), os.mkdir(p)),
+            "policy string": lambda: json.dump(dict(e, policy=dict(e["policy"], require_pq="false")), open(p, "w")),
+            "min_anchors 0": lambda: json.dump(dict(e, policy=dict(e["policy"], min_anchors=0)), open(p, "w")),
+            "min_anchors bool": lambda: json.dump(dict(e, policy=dict(e["policy"], min_anchors=True)), open(p, "w")),
+            "pins not an object": lambda: json.dump(dict(e, policy=dict(e["policy"], trusted_producer_keys=5)), open(p, "w")),
+        }
+        if hasattr(os, "mkfifo"):
+            cases["fifo"] = lambda: (os.remove(p), os.mkfifo(p))
+        for what, mutate in cases.items():
+            mutate()
+            with self.assertRaises(rc.VectorSetError, msg=what):
+                rc.run(vector_dir=d)
+            restore()
+        self.assertTrue(rc.run(vector_dir=d)["conformant"])
+        os.rename(pack, pack + ".gone")
+        with self.assertRaises(rc.VectorSetError):
+            rc.run(vector_dir=d)
+        os.rename(pack + ".gone", pack); shutil.copy(pack, os.path.join(d, "zz_orphan.json"))
+        with self.assertRaises(rc.VectorSetError):
+            rc.run(vector_dir=d)
+        os.remove(os.path.join(d, "zz_orphan.json"))
+        self.assertTrue(rc.run(vector_dir=d)["conformant"])
+        self.assertEqual(subprocess.run([sys.executable, os.path.join(self.VDIR, "run_ap2_conformance.py")],
+                                        capture_output=True, text=True).returncode, 0)
+
+
+class TestNotOkBlockStatesNothing(unittest.TestCase):
+    """NEMESIS 1.5.4 — SPEC §5: every way a producer block can be not ok, not only a failing entry: a `scheme` that does
+    not match its entries, a SKIP entry, no entry. The mutants `pq = pq and n_fail == 0 and n_skip == 0` (reference) and
+    `pq && nFail === 0 && nSkip === 0` (JS) passed every other test and the oracle."""
+
+    def _cases(self):
+        vd = os.path.join(_HERE, "spec", "vectors", "ap2")
+        base = json.load(open(os.path.join(vd, "valid_signed.json"), encoding="utf-8"))
+        pins = json.load(open(os.path.join(vd, "valid_signed.expected.json"), encoding="utf-8"))["policy"]["trusted_producer_keys"]
+        sigs = base["producer_signatures"]["signatures"]
+        def with_block(**kw):   # the producer block is outside the digest (SPEC §3): nothing to re-seal
+            e = json.loads(json.dumps(base)); e["producer_signatures"].update(kw); return e
+        unknown = dict(sigs[0], sig_alg="ed448")
+        return pins, {"scheme classical-only over a hybrid block": with_block(scheme="classical-only"),
+                      "hybrid with the ML-DSA-65 entry alone": with_block(signatures=[s for s in sigs if s["sig_alg"] == "ml-dsa-65"]),
+                      "an entry of an unknown sig_alg (SKIP)": with_block(signatures=sigs + [unknown]),
+                      "no entry": with_block(signatures=[])}
+
+    def _check(self, verify):
+        pins, cases = self._cases(); d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d)
+        for what, ev in cases.items():
+            p = os.path.join(d, "x.json"); json.dump(ev, open(p, "w", encoding="utf-8"))
+            for pin in (pins, None):
+                r = verify(p, pin)
+                prod = r["producer_signatures"]
+                self.assertIs(prod["ok"], False, what); self.assertIs(r["valid"], False, what)
+                self.assertIsNone(prod["trusted"], (what, pin is not None)); self.assertIs(r["pq_protected"], False, (what, pin is not None))
+                self.assertIs(r["policy_ok"], False, what)   # require_pq is asked: never met by a block that is not ok
+
+    def test_reference(self):
+        if not ap2._sigsuite.MLDSA_AVAILABLE:
+            self.skipTest("no ML-DSA-65 backend: the valid ML-DSA-65 entry these cases need cannot verify")
+        self._check(lambda p, pin: ap2.verify_evidence(p, trusted_producer_keys=pin, require_pq=True))
+
+    @unittest.skipUnless(shutil.which("node"), "node absent: the JS verifier is not measured")
+    def test_js(self):
+        probe = subprocess.run(["node", "-e", "const{createPublicKey}=require('node:crypto');try{createPublicKey({key:Buffer.concat([Buffer.from('308207b2300b0609608648016503040312038207a100','hex'),Buffer.alloc(1952)]),format:'der',type:'spki'});console.log('yes')}catch{console.log('no')}"], capture_output=True, text=True)
+        if probe.stdout.strip() != "yes":
+            self.skipTest("Node build without ML-DSA-65: not measured here")
+        js = os.path.join(_HERE, "verifiers", "js", "ap2-verify.mjs")
+        def verify(p, pin):
+            flags = ["--require-pq"]
+            for alg, keys in (pin or {}).items():
+                for k in keys: flags += ["--trusted-producer-key", f"{alg}={k}"]
+            return json.loads(subprocess.run(["node", js, p] + flags, capture_output=True, text=True).stdout)
+        self._check(verify)
 
 
 class TestSignatureEntryNamesTheKey(unittest.TestCase):

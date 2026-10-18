@@ -15,5 +15,8 @@
   "valid": true
  },
  "policy": {},
+ "requires_backend": [
+  "ml-dsa-65"
+ ],
  "vector": "anchor_valid"
 }
