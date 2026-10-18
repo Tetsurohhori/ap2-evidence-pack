@@ -47,11 +47,22 @@ python3 ap2_evidence.py build evidence.json checkout=checkout.sdjwt payment=paym
         [--key name=jwk.json] [--jwks-url name=https://...] [--tsa http://tsa.example]...   # 1.5.0: --tsa may repeat
 python3 ap2_evidence.py stamp evidence.json --tsa http://tsa2.example   # 1.5.0: add one more time anchor to an existing pack
 
-python3 ap2_evidence.py verify evidence.json     # offline, fail-closed; exit 0/1 (74: receipt not written, 1.5.2)
+python3 ap2_evidence.py verify evidence.json     # offline, fail-closed; exit 0/1 (74: a check not run here, with the receipt, or the receipt not written)
 python3 ap2_evidence.py verify evidence.json --trusted-producer-key ed25519=<b64> --trusted-producer-key ml-dsa-65=<b64> --require-pq --require-anchor   # relying-party policy (1.1.0)
 python3 ap2_evidence.py verify evidence.json --min-anchors 2 --tsa-cert tsa-bundle.pem   # 1.5.0: two distinct anchors, each TSA-verified
+python3 ap2_evidence.py verify evidence.json --trusted-producer-key ed25519=<b64> --trust-set-complete   # 1.6.0: the pinned set is complete
 node verifiers/js/ap2-verify.mjs evidence.json   # the independent verifier, same flags and exit codes (limits below)
 ```
+
+**Reading the verdict (1.6.0, SPEC §6.9).** Beside the twelve fields of §6 every receipt states `admission`
+(`admitted`, or `refused` with a `refusal_class`: `format_unsupported`, `unknown_member`, `malformed`), and for an admitted
+pack `states` — one state per subject (`sealed_content`, `holder_binding`, `time_anchor`, `producer_signature`,
+`issuer_identity`), each `verified`, `contradicted` or `not_evaluated` with its `reasons` (vocabulary
+`ap2-evidence-pack/states-1`, aligned with draft-krausz-verification-state-03, work in progress) — and `policy`
+(`met`, and the requirements `unmet`). `not_evaluated` is never a pass and never tampering: `key_unresolved` (a producer
+key outside your pinned set) is not `signature_invalid`, `tsa_not_checked` is a binding a self-issued token satisfies,
+`instrument_failure` is this machine, not the pack. A refused pack carries `digest_ok: false` by construction: read
+`admission` first. SPEC §10 is the reading for a relying party (with the mapping to ACP SEP #303 §7.4a).
 
 Exit 74 (1.5.2): when the receipt cannot be written whole to stdout (`/dev/full`, a file that cannot grow under
 `ulimit -f`, a reader that closed the pipe before the receipt was in it, stdout closed with `>&-`), `build`, `stamp` and
@@ -71,9 +82,13 @@ write is now 74 (1.5.1 rewrote it in place). `pqcrypto.sigsuite.ProducerIdentity
 mode 0600; a key file this process may not write (`chmod 400`) is refused with `PermissionError` and left as it was, as
 in 1.5.1. A check asked for that cannot be run on this machine is 74, never a verdict: `verify --tsa-cert` and
 `--trust-anchor` when the files openssl reads cannot be written (`cannot write a temporary file for openssl`), or when
-openssl cannot be started or gives no answer within its time limit (`cannot run openssl here`); the library raises
-`Ap2WriteError`. openssl absent is not this case and is unchanged: the field is `null` (not measured), and
-`--require-anchor` / `--min-anchors` do not count that anchor (exit 1 when the policy needs it).
+openssl cannot be started or gives no answer within its time limit (`cannot run openssl here`). Since 1.6.0 that 74
+comes WITH the complete receipt on stdout — the subject of that check `not_evaluated/instrument_failure`, the others
+evaluated — and one line `check not run here: <reason>` on stderr (1.5.2–1.5.4: no receipt); the library raises
+`Ap2WriteError` carrying that receipt in `.receipt`. A complete JSON on stdout is this case; nothing or a cut JSON is a
+receipt not written (SPEC §6.10). openssl absent is not this case and is unchanged: the field is `null` (not measured),
+the subject `not_evaluated/instrument_failure`, and `--require-anchor` / `--min-anchors` do not count that anchor (exit 1
+when the policy needs it).
 What the JS verifier cannot see: with stdout or stderr closed (`>&-`, `2>&-`) Node reopens the descriptor on `/dev/null`
 and the write succeeds, so the exit is the verdict's 0/1 (2 for usage); the Python CLI exits 74 there. In process, after
 text the caller wrote to a `utf-8-sig` pipe, the receipt carries a second byte order mark (the command line never does).
@@ -95,8 +110,8 @@ chain linkage and `provenance_classes` / `self_asserted_only` for capture streng
 (`supplied`, `jwks_fetched`), not a certificate that names a famous CA as its issuer. Only an
 `x5c` chain that validates to a trust anchor YOU supply does (`--trust-anchor <PEM>`, reported in
 `chain_verified`, validated at the `genTime` of a TSA-verified token when the pack has one, so an
-expired signing certificate still counts years later); the Node verifier cannot validate chains and
-reports `chain_verified: null`. A cleared flag says a CA under your anchor certified that key — not
+expired signing certificate still counts years later); the Node verifier cannot validate chains and,
+since 1.6.0, refuses `--trust-anchor` as a usage error (exit 2) instead of accepting it and reporting `chain_verified: null`. A cleared flag says a CA under your anchor certified that key — not
 that the key belongs to the mandate's issuer; read `artifacts[].x5c_leaf` for the subject and issuer
 DN of the certificate that was validated.
 
@@ -152,11 +167,16 @@ anchor required-but-missing, time anchor claimed-but-invalid, a real token issue
 another digest; since 1.4.0 an unknown key at the top level / inside the anchor block / inside
 an artifact entry / inside a producer-signature entry, a `crit` nobody understands, and a
 KB-JWT without `typ: kb+jwt`; since 1.5.0 seven `anchors` cases of SPEC §3.3, the three refusals pinned to their exact
-text; since 1.5.4 three producer blocks that do not verify, SPEC §5). An independent verifier
+text; since 1.5.4 three producer blocks that do not verify, SPEC §5); since 1.6.0 thirteen more, one for each cell of
+the SPEC §6.9 states table the others did not reach (`holder_*`, `sealed_binding_mismatch`, `time_*`, `producer_*`,
+`issuer_x5c_*`; five of them under `--tsa-cert` or `--trust-anchor`, which need openssl), and every expected file carries
+the `states` block a verifier must reproduce. 1.6.0 changes the twelve fields of two vectors (an unknown key inside an
+artifact entry or a producer-signature entry is now a refusal, SPEC §9.1): a verifier conformant to 1.5.x is not
+conformant to 1.6.0 on those two. An independent verifier
 claims conformance by reproducing each vector's `normative` block under its declared
-policy, from the spec text alone. Since 1.5.4 the twelve vectors whose verdict needs an ML-DSA-65 backend say so
-(`"requires_backend": ["ml-dsa-65"]` in their `.expected.json`, SPEC §7): a verifier without that backend reports them
-SKIP, not as disagreements, and does not claim them. Which twelve is measured — the reference run with and without its
+policy, from the spec text alone. Since 1.5.4 the vectors whose verdict needs an ML-DSA-65 backend say so
+(`"requires_backend": ["ml-dsa-65"]` in their `.expected.json`, SPEC §7; twelve in 1.5.4, twenty-one in 1.6.0): a verifier
+without that backend reports them SKIP, not as disagreements, and does not claim them. Which ones is measured — the reference run with and without its
 backend — and the test suite repeats the measurement:
 
 ```bash
@@ -165,13 +185,14 @@ python3 spec/vectors/ap2/run_ap2_conformance.py   # exit 0 = conformant
 
 | Implementation | Runtime / deps | Status |
 |---|---|---|
-| `ap2_evidence.py` | Python 3 + `cryptography` | reference — conformant 29/29; ACVP ML-DSA-65 sigVer 9/9 |
-| `verifiers/js/ap2-verify.mjs` | Node with OpenSSL ≥ 3.5 for ML-DSA-65 (measured: Node 22.23.2 / OpenSSL 3.5.7 locally, Node 24 in CI), `node:crypto` only; on an older build ML-DSA-65 is SKIP = incomplete, never a pass, and the ML-DSA vectors are not measured (the JS conformance test skips, it does not pass); no TSA signature check — `tsa_verified` null | independent — conformant 29/29 on every normative field (and the `report` block) through `run_ap2_conformance.run(verify_fn=…)` (`test_ap2_conformance.py`) |
+| `ap2_evidence.py` | Python 3 + `cryptography`; `openssl` for `--tsa-cert` / `--trust-anchor` | reference — conformant 42/42 (1.6.0); ACVP ML-DSA-65 sigVer 9/9 |
+| `verifiers/js/ap2-verify.mjs` | Node with OpenSSL ≥ 3.5 for ML-DSA-65 (measured: Node 22.23.2 / OpenSSL 3.5.7 locally, Node 24 in CI), `node:crypto` only; on an older build ML-DSA-65 is SKIP = incomplete, never a pass, and the ML-DSA vectors are not measured (the JS conformance test skips, it does not pass); no TSA signature check — `tsa_verified` null, `time_anchor` `instrument_failure`; no x5c chain validation — `--trust-anchor` is a usage error (1.6.0) | independent — conformant on 37/42 on every normative field, the `report` and the `states` block, through `run_ap2_conformance.run(verify_fn=…)` (`test_ap2_conformance.py`); the 5 vectors that need openssl are SKIP (1.6.0) |
 
 **Closed schema (1.4.0, SPEC §9; 1.4.1).** Measured on 1.3.0 on 2026-10-10: a key nobody had defined, written inside
 `rfc3161_timestamp`, `producer_signatures` or a `signatures[i]` entry, was `valid: true` in both verifiers with nothing in
 the receipt. Every object this format defines is now an exhaustive key list — unknown key, wrong type or missing MUST is a
-refusal / artifact error / FAIL entry that names the key (a signature entry's FAIL names it since 1.4.1) — and every object a standard defines (JOSE header, JWK, `cnf`,
+refusal / artifact error / FAIL entry that names the key (a signature entry's FAIL names it since 1.4.1; since 1.6.0 an
+unknown key is a refusal in every one of these objects, `refusal_class: unknown_member`) — and every object a standard defines (JOSE header, JWK, `cnf`,
 KB-JWT) follows that standard's rule for the unknown (ignored) and REPORTS the ignored names in `artifacts[i].ignored`;
 `crit` makes the JWS invalid (RFC 7515 §4.1.11). The proof is generative: `verifiers/schema_mutants.py` derives from every
 vector and from freshly signed packs 12 818 mutations at every level of every object (unknown keys in eight spellings and
@@ -180,7 +201,13 @@ KB-JWT claims, out-of-grammar files), computes each one's expected class from th
 it and to each other: 12 818/12 818, 0 disagreements on 1.4.0; on the 1.3.0 verifiers the same corpus passed SILENTLY
 8 186 times in both, with the two agreeing on every one (CHANGELOG 1.4.0). 1.5.0 adds `anchors` to the tables: 16 503
 mutations from 37 sources, each with its class in both verifiers, 0 disagreements on 16 540 files (measured 2026-10-11).
-The quick subset (3 976) runs in CI.
+1.6.0 (an unknown key in an artifact entry or a signature entry is a refusal, `refusal_class: unknown_member`): 23 486
+mutations from 59 sources, each with its class in both verifiers, 0 disagreements on 23 545 files; with that refusal removed
+from a copy of the reference, 2 520 miss their class (measured 2026-10-18). The quick subset (5 660) runs in CI.
+`verifiers/states_controls.py` (1.6.0) runs the same corpus through the controls of the states (SPEC §6.9): no
+`contradicted` without a check that ran and failed, no `verified` over a check that did not run, the `valid` equation,
+pinned sets that never create a contradiction — 22 967 receipts, 0 violations; each of six deliberately broken rules of
+the derivation turns it red.
 
 **Differential oracle** (`verifiers/differential_oracle.py`, 22/09/2026): the two verifiers must
 give the same `(valid, digest_ok, bindings_ok, producer_ok, pq_protected, rfc3161_verified,
@@ -229,6 +256,13 @@ REJECT to everything is caught; through 1.2.0 this sentence said more than the o
 controls, and two verifiers refusing one alike were an agreement — measured by ablation on 25/09/2026, see CHANGELOG). The CA-issued `x5c` leaf under `--trust-anchor`, the only case
 where `self_asserted_only` is false, is one of the hostile files, not one of those three — this sentence said
 otherwise through 1.1.2:
+Re-measured 2026-10-18 on 1.6.0, which also compares `admission`, `refusal_class`, the state and reasons of every subject
+and `policy`, and passes the vectors' `tsa_cert` / `trust_anchor` / `trust_set_complete`: **185 cases, 0 disagreements, of
+which 12 are declared divergences** (`45 vector runs + 117 hostile files + 4 positive controls + 19 CLI cases = 185`; the
+six new declared ones have the one cause of the others — TSA and chain checks are openssl-only: the five 1.6.0 vectors
+under `--tsa-cert` / `--trust-anchor`, where JS states `instrument_failure` or gives a usage error, and the self-forged
+token under `--tsa-cert`, now `tsa_invalid` in the reference and `instrument_failure` in JS); a copy of the JS verifier with
+one reason renamed (`tsa_not_checked`) gives 8 disagreements on the same run.
 Re-measured 2026-10-18 on 1.5.4: **172 cases, 0 disagreements, of which 6 are declared divergences**
 (`32 vector runs + 117 hostile files + 4 positive controls + 19 CLI cases = 172`: the three 1.5.4 vectors); against the
 1.5.3 JS verifier the same run reports 10 disagreements, the three new vectors and seven hostile producer blocks whose

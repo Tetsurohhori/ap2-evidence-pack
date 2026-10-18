@@ -106,7 +106,21 @@ class Ap2EvidenceError(ValueError):
 
 class Ap2WriteError(Ap2EvidenceError, OSError):
     """1.5.2 — the output file (the pack `build` writes, the pack `stamp` rewrites) could not be written. Also an OSError,
-    which is what `build_evidence` raised there before. The CLI exits 74 (EX_IOERR) on it, whatever the outcome was."""
+    which is what `build_evidence` raised there before. The CLI exits 74 (EX_IOERR) on it, whatever the outcome was.
+
+    1.6.0 (SPEC §6.10): raised by `verify_evidence` when a check asked for could not be RUN here (openssl's temporary
+    files, openssl that cannot be started or does not answer); it then carries the COMPLETE receipt in `receipt`, where
+    the subject of that check is `not_evaluated` with reason `instrument_failure` and the other subjects are evaluated.
+    The CLI writes that receipt and exits 74. `receipt` is None when nothing was computed (a file that was not written)."""
+
+    def __init__(self, *args, receipt=None):
+        super().__init__(*args)
+        self.receipt = receipt
+
+
+class Ap2UnknownMember(Ap2EvidenceError):
+    """1.6.0 — SPEC §9.1: a key outside the closed list of an object of this format. A refusal of class `unknown_member`
+    (§6.9): it can come from a later revision of the format, so it is kept apart from a malformed input."""
 
 
 # ────────────────────────────────────────────────────────── b64url / hashing
@@ -481,13 +495,23 @@ def _check_closed(obj, what: str, allowed: Dict[str, tuple], err=None):
         raise err(f"{what} must be an object (SPEC §9.1)")
     unknown = sorted(k for k in obj if k not in allowed)   # 1.4.1: the first unknown key by code point, not by file order
     if unknown:                                            # (JS Object.keys puts integer-like keys first: the two named different keys)
-        raise err(f"{what}: unknown key {_jkey(unknown[0])} (SPEC §9.1)")
+        raise (Ap2UnknownMember if err is Ap2EvidenceError else err)(f"{what}: unknown key {_jkey(unknown[0])} (SPEC §9.1)")
     for k, (pred, desc, required) in allowed.items():
         if k in obj:
             if not pred(obj[k]):
                 raise err(f"{what}: {k} must be {desc} (SPEC §9.1)")
         elif required:
             raise err(f"{what}: missing {k} (SPEC §9.1)")
+
+
+def _check_unknown(obj, what: str, allowed) -> None:
+    """1.6.0 — SPEC §9.1/§6.9: only the unknown-key rule of `_check_closed`, for the objects whose other violations stay an
+    artifact error or a FAIL entry (`artifacts[i]` and its `key`, `kb_jwt`, `verified_at_build`; `signatures[i]`). An
+    object that is not a dict is left to those rules."""
+    if isinstance(obj, dict):
+        unknown = sorted(k for k in obj if k not in allowed)
+        if unknown:
+            raise Ap2UnknownMember(f"{what}: unknown key {_jkey(unknown[0])} (SPEC §9.1)")
 
 
 _TOP_KEYS = {"evidence_format": (_is_str, "a string", True), "subject": (_is_str, "a string", True), "created_utc": (_is_str, "a string", True),
@@ -574,7 +598,14 @@ def _check_provenance(pc, parsed: Dict, key: Dict, trust_anchor: Optional[str] =
     ident["chain_verified"] = None     # r11: always present, as in the JS receipt — None = not measured
     if trust_anchor is None:
         return True, ident   # no anchor: the certificate proves only that the key is in a blob the signer wrote
-    chain_ok = _verify_x5c_chain(x5c, trust_anchor, at_time=at_time)
+    diag: Dict = {}
+    try:
+        chain_ok = _verify_x5c_chain(x5c, trust_anchor, at_time=at_time, diag=diag)
+        if diag.get("broken"):
+            ident["_broken"] = diag["broken"]
+    except Ap2WriteError as e:   # 1.6.0 (SPEC §6.10): not run here = not measured (None); the receipt goes on
+        chain_ok = None
+        ident["_not_run"] = str(e)
     ident["chain_verified"] = chain_ok
     return (chain_ok is not True), ident   # only a chain that really validated clears it (None = openssl absent = unmeasurable)
 
@@ -632,7 +663,8 @@ def _tmp_write(path: str, data: bytes) -> None:
         raise _tmp_error(e) from e
 
 
-def _verify_x5c_chain(x5c: List[str], trust_anchor: str, at_time: Optional[str] = None, timeout: int = 15) -> Optional[bool]:
+def _verify_x5c_chain(x5c: List[str], trust_anchor: str, at_time: Optional[str] = None, timeout: int = 15,
+                      diag: Optional[Dict] = None) -> Optional[bool]:
     """Validate the x5c chain to a PEM trust anchor with `openssl verify` (the reference only, like `openssl ts -verify` for
     the TSA — the JS verifier reports `chain_verified: null` and never clears `self_asserted_only`: declared divergence).
 
@@ -656,6 +688,8 @@ def _verify_x5c_chain(x5c: List[str], trust_anchor: str, at_time: Optional[str] 
         try:
             chain = [_sigsuite._unb64(c) for c in x5c]
         except Exception:  # noqa: BLE001
+            if diag is not None:
+                diag["broken"] = "an x5c entry is not strict base64"
             return False
         leaf_path = os.path.join(d, "leaf.pem")
         _tmp_write(leaf_path, pem(chain[0]))
@@ -672,7 +706,10 @@ def _verify_x5c_chain(x5c: List[str], trust_anchor: str, at_time: Optional[str] 
             _tmp_write(unt, b"".join(pem(c) for c in chain[1:]))
             cmd += ["-untrusted", unt]
         r = _run_openssl(cmd + [leaf_path], timeout, text=True)
-        return r.returncode == 0 and ": OK" in (r.stdout or "")
+        ok = r.returncode == 0 and ": OK" in (r.stdout or "")
+        if not ok and diag is not None and "certificate signature failure" in ((r.stdout or "") + (r.stderr or "")):
+            diag["broken"] = "certificate signature failure"   # 1.6.0 (SPEC §6.9): a signature inside the chain does not verify
+        return ok
     except Ap2WriteError:
         raise
     except Exception:  # noqa: BLE001
@@ -988,7 +1025,10 @@ def _verify_rfc3161(tsr_b64: str, expected_digest_hex: str, timeout: int = 15, t
     exe = shutil.which("openssl")
     if not exe:
         out["tsa_note"] = "openssl absent — TSA signature/chain NOT verified"; return out
-    d = _openssl_tmpdir()
+    try:
+        d = _openssl_tmpdir()
+    except Ap2WriteError as e:   # 1.6.0 (SPEC §6.10): the check could not be run here — recorded, the receipt goes on
+        out["tsa_note"] = f"check not run here: {e}"; out["_not_run"] = str(e); return out
     try:
         path = os.path.join(d, "t.tsr")
         _tmp_write(path, tsr)
@@ -1001,8 +1041,8 @@ def _verify_rfc3161(tsr_b64: str, expected_digest_hex: str, timeout: int = 15, t
         out["tsa_verified"] = r.returncode == 0 and "Verification: OK" in (r.stdout or "")
         if not out["tsa_verified"]:   # `verified` keeps its §3.2 meaning (binding); the TSA outcome is its own field, in both verifiers
             out["tsa_note"] = (r.stderr or r.stdout).strip()[-160:]
-    except Ap2WriteError:
-        raise
+    except Ap2WriteError as e:   # 1.6.0 (SPEC §6.10): not run here = not measured (None), never a failed TSA
+        out["tsa_verified"] = None; out["tsa_note"] = f"check not run here: {e}"; out["_not_run"] = str(e)
     except Exception as e:  # noqa: BLE001
         out["tsa_verified"] = False; out["tsa_note"] = f"{type(e).__name__}: {str(e)[:80]}"
     finally:
@@ -1249,32 +1289,159 @@ def _gt_key(gt: str):
     return (whole, float("0." + frac) if frac else 0.0)
 
 
+STATES_VOCABULARY = "ap2-evidence-pack/states-1"   # 1.6.0 — SPEC §6.9: immutable; a change of meaning is a new identifier
+REFUSAL_CLASSES = ("format_unsupported", "unknown_member", "malformed")
+SUBJECTS = ("sealed_content", "holder_binding", "time_anchor", "producer_signature", "issuer_identity")
+POLICY_UNMET = ("require_producer", "require_pq", "require_anchor", "min_anchors", "trusted_producer_keys", "trust_set_complete")
+
+
+def _refusal_receipt(msg: str, cls: str) -> Dict:
+    """A refusal (SPEC §6.9): the pack was not admitted, so it receives no `states` and no `policy`; the twelve 1.5.x fields
+    keep their values, `false` by construction (not measured: read `admission`, SPEC §10)."""
+    assert cls in REFUSAL_CLASSES, cls
+    return {"digest_ok": False, "artifacts": [], "producer_signatures": {"present": False, "ok": None, "pq_protected": False, "trusted": None},
+            "pq_protected": False, "bindings_ok": False, "rfc3161": {"claimed": False, "verified": None}, "anchors": [], "anchors_verified": 0, "provenance_classes": [],
+            "self_asserted_only": True, "chain_verified": None, "policy_ok": False, "valid": False, "honest_scope": None, "refused": msg,
+            "admission": "refused", "refusal_class": cls, "states_vocabulary": STATES_VOCABULARY, "states": None, "policy": None,
+            "mldsa_backend": bool(_sigsuite.MLDSA_AVAILABLE)}
+
+
+def _subject(elements: List[Tuple]) -> Dict:
+    """SPEC §6.9: one state per subject from its elements (state, reason, detail). Precedence: contradicted >
+    not_evaluated/instrument_failure > other not_evaluated > verified; `verified` only when every element is. `reasons`:
+    one per element that is not verified, in element order (for a `verified` subject, the qualifiers its elements carry)."""
+    def rank(e):
+        return 3 if e[0] == "contradicted" else 2 if e[1] == "instrument_failure" else 1 if e[0] == "not_evaluated" else 0
+    top = max(elements, key=rank)
+    state = top[0]
+    if state == "verified":
+        reasons = [e[1] for e in elements if e[1]]
+    else:
+        reasons = [e[1] for e in elements if e[0] != "verified"]
+    out = {"state": state, "reasons": reasons}
+    details = [e[2] for e in elements if len(e) > 2 and e[2]]
+    if details:
+        out["detail"] = "; ".join(details)
+    return out
+
+
+def _anchor_element(r: Dict, tsa_requested: bool) -> Tuple:
+    """SPEC §6.9, `time_anchor`: one RFC 3161 token (the `rfc3161_timestamp` block or one `anchors` entry)."""
+    if r.get("verified") is not True:
+        return ("contradicted", "binding_mismatch" if r.get("imprint_ok") is False else "token_invalid")
+    if not tsa_requested:
+        return ("not_evaluated", "tsa_not_checked")
+    if r.get("tsa_verified") is True:
+        return ("verified", None)
+    if r.get("tsa_verified") is False:
+        return ("not_evaluated", "tsa_invalid")
+    return ("not_evaluated", "instrument_failure", r.get("tsa_note") or "TSA signature not checked by this verifier")
+
+
+def derive_states(*, digest_ok, art_results, binding_set_match, ts_block, rfc_block, anchor_results, tsa_requested,
+                  producer, pinned, trust_anchor_given) -> Dict:
+    """SPEC §6.9 — the five subjects of an admitted pack, from the facts the verifier measured (the same derivation as
+    the JS verifier's deriveStates)."""
+    sealed = [("verified", None) if digest_ok else ("contradicted", "digest_mismatch")]
+    if not art_results:
+        sealed.append(("contradicted", "artifact_invalid", "the pack carries no artifact"))
+    for r in art_results:
+        bad = "error" in r or r.get("signature_ok") is not True or r.get("claims_match") is not True
+        sealed.append(("contradicted", "artifact_invalid") if bad else ("verified", None))
+    if binding_set_match is not None:   # recomputed whenever every artifact's signature and claims verified (SPEC §6.9)
+        sealed.append(("verified", None) if binding_set_match else ("contradicted", "binding_mismatch"))
+    verified_arts = [r for r in art_results if "error" not in r]
+    not_seen = None if len(verified_arts) == len(art_results) else "artifacts that are errors are stated in sealed_content only"
+    holder = []
+    for r in verified_arts:
+        kb = r.get("kb_jwt") or {}
+        if not kb.get("present"):
+            continue
+        if kb.get("verified") is True:
+            holder.append(("verified", None))
+        elif kb.get("verified") is False:
+            holder.append(("contradicted", "kb_signature_invalid" if kb.get("signature_ok") is not True else "sd_hash_mismatch"))
+        else:
+            holder.append(("not_evaluated", "holder_key_unknown"))
+    if not holder:
+        holder = [("not_evaluated", "not_present", not_seen)]
+    time_ = []
+    if ts_block.get("anchored"):
+        time_.append(_anchor_element(rfc_block, tsa_requested) if isinstance(ts_block.get("tsr_b64"), str) else ("contradicted", "token_missing"))
+    for r in anchor_results:
+        time_.append(_anchor_element(r, tsa_requested))
+    if not time_:
+        time_ = [("not_evaluated", "not_present")]
+    prod = []
+    if not producer.get("present"):
+        prod = [("not_evaluated", "not_present")]
+    else:
+        for e in producer.get("signatures") or []:
+            if e.get("status") == "FAIL":
+                prod.append(("contradicted", "signature_invalid"))
+            elif e.get("status") == "SKIP":
+                prod.append(("not_evaluated", "backend_missing"))
+            elif not pinned:
+                prod.append(("not_evaluated", "self_asserted"))
+            elif e.get("key_trusted") is True:
+                prod.append(("verified", None))
+            else:
+                prod.append(("not_evaluated", "key_unresolved"))
+        if not producer.get("signatures"):
+            prod.append(("contradicted", "signature_invalid", "the producer block carries no signature entry"))
+        elif producer.get("scheme_ok") is not True:
+            prod.append(("contradicted", "signature_invalid", f"scheme {_jkey(producer.get('scheme'))} does not match its entries (SPEC §5)"))
+    issuer = []
+    for r in verified_arts:
+        if r.get("provenance_class") != "x5c_header":
+            issuer.append(("not_evaluated", "self_asserted"))
+        elif not trust_anchor_given:
+            issuer.append(("not_evaluated", "no_trust_anchor"))
+        else:
+            leaf = r.get("x5c_leaf") or {}
+            cv = leaf.get("chain_verified")
+            if cv is True:
+                issuer.append(("verified", "ca_certified"))
+            elif cv is False:
+                issuer.append(("contradicted", "chain_broken", leaf.get("_broken")) if leaf.get("_broken") else ("not_evaluated", "chain_unresolved"))
+            else:
+                issuer.append(("not_evaluated", "instrument_failure", f"check not run here: {leaf['_not_run']}" if leaf.get("_not_run")
+                              else "openssl absent — x5c chain NOT verified"))
+    if not issuer:
+        issuer = [("not_evaluated", "not_present", not_seen or "the pack carries no artifact")]
+    return {"sealed_content": _subject(sealed), "holder_binding": _subject(holder), "time_anchor": _subject(time_),
+            "producer_signature": _subject(prod), "issuer_identity": _subject(issuer)}
+
+
 def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = False,
                     require_producer: bool = False, require_anchor: bool = False, tsa_cert: Optional[str] = None,
-                    trust_anchor: Optional[str] = None, min_anchors: Optional[int] = None) -> Dict:
+                    trust_anchor: Optional[str] = None, min_anchors: Optional[int] = None,
+                    trust_set_complete: bool = False) -> Dict:
     """OFFLINE re-verification from the evidence file alone: digest, every signature with
     the SNAPSHOTTED key, every disclosure, every binding, and the RFC 3161 token's binding
     (status + imprint; the TSA itself only with `tsa_cert`, via openssl). Fail-closed. Raises Ap2WriteError (1.5.2) when
     a check asked for (`tsa_cert`, `trust_anchor`) cannot be run here — openssl's temporary files cannot be written,
     openssl cannot be started, or it gives no answer in time: no verdict, rather than a check reported as failed. openssl
-    absent is not this case: the field is None (not measured) and a policy that needs it is not met."""
+    absent is not this case: the field is None (not measured) and a policy that needs it is not met.
+
+    1.6.0 (SPEC §6.9, §6.10): the receipt carries `admission`, `refusal_class`, `states_vocabulary`, `states` (five subjects)
+    and `policy` ({met, unmet}); `trust_set_complete` declares the pinned set complete (an unpinned key is then also a
+    policy failure, `unmet: ["trust_set_complete"]`). A check that could not be RUN here no longer leaves the caller without
+    a receipt: the receipt is completed (that subject `not_evaluated/instrument_failure`) and Ap2WriteError carries it."""
     if min_anchors is not None and (type(min_anchors) is not int or min_anchors < 1):   # SPEC §3.3: an integer >= 1 —
         raise ValueError(f"min_anchors must be an integer >= 1 (got {min_anchors!r})")      # 0, NaN or "2" never weakens the policy in silence
     try:
         ev = read_evidence_file(path)
     except Ap2EvidenceError as e:   # 1.1.0: a hostile or unreadable file is a refusal receipt, never a traceback
-        return {"digest_ok": False, "artifacts": [], "producer_signatures": {"present": False, "pq_protected": False, "trusted": None},
-                "pq_protected": False, "bindings_ok": False, "rfc3161": {"claimed": False, "verified": None}, "anchors": [], "anchors_verified": 0, "provenance_classes": [],
-                "self_asserted_only": True, "chain_verified": None, "policy_ok": False, "valid": False, "honest_scope": None, "refused": str(e)}
-    def refusal(msg):
-        return {"digest_ok": False, "artifacts": [], "producer_signatures": {"present": False, "pq_protected": False, "trusted": None},
-                "pq_protected": False, "bindings_ok": False, "rfc3161": {"claimed": False, "verified": None}, "anchors": [], "anchors_verified": 0, "provenance_classes": [],
-                "self_asserted_only": True, "chain_verified": None, "policy_ok": False, "valid": False, "honest_scope": None, "refused": msg}
+        return _refusal_receipt(str(e), "malformed")
+
+    def refusal(msg, cls="malformed"):   # 1.6.0 — SPEC §6.9: every refusal names its class
+        return _refusal_receipt(msg, cls)
     # 1.1.0 (review r1): the SHAPE of the top-level fields is checked before anything touches them — `artifacts` a list of
     # objects, `bindings` a list, `rfc3161_timestamp` an object or absent, `producer_signatures` an object or absent. A wrong
     # type used to be a TypeError/AttributeError traceback (the JS verifier answered); `producer_signatures: {}` was "absent".
     if ev.get("evidence_format") != EVIDENCE_FORMAT:   # r5: version confusion — a "…/2.0" pack was verified under the 1.0 rules
-        return refusal(f"evidence_format must be {EVIDENCE_FORMAT!r}")
+        return refusal(f"evidence_format must be {EVIDENCE_FORMAT!r}", "format_unsupported")
     for f in ("subject", "created_utc", "honest_scope"):   # SPEC §1 MUSTs: present and a string, or the receipt is silently poorer
         if not isinstance(ev.get(f), str):
             return refusal(f"{f} must be a string (SPEC §1)")
@@ -1285,7 +1452,7 @@ def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = Fa
     if hashlib.sha256(ev["honest_scope"].encode("utf-8")).hexdigest() != HONEST_SCOPE_SHA256:
         # r8: the receipt used to REPRINT whatever scope the file carried — an author could write "anchored by a QTSP under
         # eIDAS art. 45j" and see it beside `valid: true`. The scope is the format's, not the pack's (SPEC §1).
-        return refusal("honest_scope does not match the canonical scope of this evidence_format (SPEC §1)")
+        return refusal("honest_scope does not match the canonical scope of this evidence_format (SPEC §1)", "format_unsupported")
     if not isinstance(ev.get("artifacts"), list) or any(not isinstance(a, dict) for a in ev["artifacts"]):
         return refusal("artifacts must be a list of objects")
     names = [a.get("name") for a in ev["artifacts"]]   # r3: the name keys the binding table — a non-string crashed the JS table, "__proto__" vanished from it
@@ -1317,9 +1484,22 @@ def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = Fa
                 raise Ap2EvidenceError(f"anchors[{i}]: missing mechanism (SPEC §9.1)")
             if not isinstance(an["mechanism"], str):
                 raise Ap2EvidenceError(f"anchors[{i}]: mechanism must be a string (SPEC §9.1)")
-            if an["mechanism"] not in _ANCHOR_MECHANISMS:
-                raise Ap2EvidenceError(f"anchors[{i}]: mechanism {_jkey(an['mechanism'])} is not defined by this revision (SPEC §3.3)")
+            if an["mechanism"] not in _ANCHOR_MECHANISMS:   # 1.6.0: a mechanism a later revision may define -> format_unsupported
+                return refusal(f"anchors[{i}]: mechanism {_jkey(an['mechanism'])} is not defined by this revision (SPEC §3.3)", "format_unsupported")
             _check_closed(an, f"anchors[{i}]", _ANCHOR_RFC3161_KEYS)
+        # 1.6.0 — SPEC §9.1/§6.9 (not additive): an unknown key in an artifact entry (and its key, kb_jwt and verified_at_build
+        # objects) or in a producer-signature entry is a refusal of class unknown_member, as in every other object of §9.1:
+        # 1.5.x made it an artifact error or a FAIL entry, which a reader of the twelve fields took for an altered pack.
+        # Only the unknown-key rule moves; a wrong type or a missing key stays an artifact error / FAIL entry.
+        for i, a in enumerate(ev["artifacts"]):
+            _check_unknown(a, f"artifacts[{i}]", _ARTIFACT_KEYS)
+            for sub, keys in (("key", _KEY_KEYS), ("kb_jwt", _KB_COPY_KEYS), ("verified_at_build", _VAB_KEYS)):
+                _check_unknown(a.get(sub), f"artifacts[{i}].{sub}", keys)
+        sigs = ev.get("producer_signatures", {}).get("signatures")
+        for i, e in enumerate(sigs if isinstance(sigs, list) else []):
+            _check_unknown(e, f"producer_signatures.signatures[{i}]", _sigsuite.ENTRY_KEYS)
+    except Ap2UnknownMember as e:
+        return refusal(str(e), "unknown_member")
     except Ap2EvidenceError as e:
         return refusal(str(e))
     e2 = {k: v for k, v in ev.items() if k not in _DIGEST_EXCLUDED}
@@ -1347,6 +1527,7 @@ def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = Fa
             if r_.get("tsa_verified") is True and r_.get("gen_time") and (earliest is None or _gt_key(r_["gen_time"]) < _gt_key(earliest)):
                 earliest = r_["gen_time"]
     anchors_verified = len(counted)
+    rfc_block = rfc   # 1.6.0: the block's own result, before the §3.3 aggregate (an element of `time_anchor`)
     if anchor_results:   # the aggregate of §3.3; without `anchors` the block is exactly what 1.4.x reported
         rfc = dict(rfc, claimed=True, verified=(False if (rfc.get("verified") is False or any(x.get("verified") is not True for x in anchor_results)) else True))
     proven_time = earliest
@@ -1404,6 +1585,15 @@ def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = Fa
             art_results.append({"name": a.get("name") if isinstance(a, dict) else None, "error": f"{type(e).__name__}: {str(e)[:120]}"})
             all_ok = False
 
+    # 1.6.0 — SPEC §6.9: the binding set as an element of sealed_content is recomputed whenever every artifact's issuer
+    # signature and claims verified — also when a KB-JWT failed, where `bindings_ok` is false by the §6 step 3 rule without a
+    # recomputation (the state must not say `verified` over a check that did not run; found by verifiers/states_controls.py)
+    binding_set_match = None
+    if art_results and len(for_bindings) == len(art_results) and all(r.get("signature_ok") is True and r.get("claims_match") is True for r in art_results):
+        try:
+            binding_set_match = sorted(_canon(b) for b in find_bindings(for_bindings)) == sorted(_canon(b) for b in ev.get("bindings", []))
+        except Exception:  # noqa: BLE001
+            binding_set_match = False
     try:   # r4: the binding SET (SPEC §4) — entries compared by sorted canonical form; the scan order of JS Object.keys puts
         # array-index keys ("0", "7") first, so an ordered comparison split the verdict on a pack the reference itself built
         bindings_ok = (sorted(_canon(b) for b in find_bindings(for_bindings)) == sorted(_canon(b) for b in ev.get("bindings", []))) if all_ok else False
@@ -1429,23 +1619,44 @@ def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = Fa
         if trusted_producer_keys is not None and pv["trusted"] is not True:
             all_ok = False
     else:
-        producer = {"present": False, "pq_protected": False, "trusted": None,
+        producer = {"present": False, "ok": None, "pq_protected": False, "trusted": None,   # 1.6.0: `ok` always present
                     "note": "no producer signature; pack integrity rests on digest + time anchor only. "
                             "Without a pinned producer key a signature would prove consistency, not authenticity."}
     # relying-party policy: enforce PQ / producer so a stripped-signature downgrade is rejected
-    policy_ok = True
+    # require_anchor: the existed-by claim must be PROVEN, not merely claimed. A missing anchor, an unverifiable one (no
+    # openssl -> verified None), or a failing token all reject — fail-closed, "claimed" never upgrades to "proven".
+    # 1.6.0 — SPEC §6.9: each requirement that is not met is NAMED in `policy.unmet`; `policy_ok` keeps its 1.5.x meaning
+    # (the four policy inputs of 1.5.x), `policy.met` is false when anything in `unmet` (also the pinned set and
+    # `trust_set_complete`).
+    unmet = []
     if require_producer and not (producer["present"] and producer.get("ok")):
-        policy_ok = False
+        unmet.append("require_producer")
     if require_pq and not (producer.get("pq_protected") and producer.get("trusted") is True):
-        policy_ok = False
-    # require_anchor: the existed-by claim must be PROVEN, not merely claimed. A missing
-    # anchor, an unverifiable one (no openssl -> verified None), or a failing token all
-    # reject — fail-closed, "claimed" never upgrades to "proven".
-    need = max(1 if require_anchor else 0, min_anchors or 0)   # SPEC §3.3: require_anchor alone is min_anchors = 1
-    if need and anchors_verified < need:
-        policy_ok = False
+        unmet.append("require_pq")
+    if require_anchor and anchors_verified < 1:
+        unmet.append("require_anchor")
+    if min_anchors is not None and anchors_verified < min_anchors:   # SPEC §3.3: require_anchor alone is min_anchors = 1
+        unmet.append("min_anchors")
+    policy_ok = not unmet
+    if trusted_producer_keys is not None and producer["present"] and producer.get("trusted") is not True:
+        unmet.append("trusted_producer_keys")
+    tsa_requested = tsa_cert is not None
+    states = derive_states(digest_ok=digest_ok, art_results=art_results, binding_set_match=binding_set_match, ts_block=ts,
+                           rfc_block=rfc_block, anchor_results=anchor_results, tsa_requested=tsa_requested, producer=producer,
+                           pinned=trusted_producer_keys is not None, trust_anchor_given=trust_anchor is not None)
+    if trust_set_complete and "key_unresolved" in states["producer_signature"]["reasons"]:   # SPEC §6.9 (krausz §5.4.2)
+        unmet.append("trust_set_complete")
+    not_run = [x.pop("_not_run") for x in [rfc_block] + anchor_results if "_not_run" in x]
+    for r_ in art_results:
+        leaf = r_.get("x5c_leaf")
+        if leaf:
+            leaf.pop("_broken", None)
+            if "_not_run" in leaf:
+                not_run.append(leaf.pop("_not_run"))
+    if rfc is not rfc_block:
+        rfc.pop("_not_run", None)
 
-    return {"digest_ok": digest_ok, "artifacts": art_results,
+    receipt = {"digest_ok": digest_ok, "artifacts": art_results,
             "producer_signatures": producer, "pq_protected": producer.get("pq_protected", False),
             "bindings_ok": bindings_ok, "rfc3161": rfc,
             "anchors": anchor_results, "anchors_verified": anchors_verified,   # 1.5.0 — SPEC §3.3
@@ -1466,9 +1677,15 @@ def verify_evidence(path: str, trusted_producer_keys=None, require_pq: bool = Fa
             "valid": bool(art_results and digest_ok and all_ok and bindings_ok
                           and rfc.get("verified") is not False and policy_ok),
             "honest_scope": ev.get("honest_scope"),
+            "admission": "admitted", "refusal_class": None,   # 1.6.0 — SPEC §6.9
+            "states_vocabulary": STATES_VOCABULARY, "states": states,
+            "policy": {"met": not unmet, "unmet": [u for u in POLICY_UNMET if u in unmet]},
             # informative, both verifiers (SPEC §6): whether THIS verifier can check ML-DSA-65 at all — without it a
             # producer signature is SKIP, never a pass, and the reader of the receipt should not have to guess why
             "mldsa_backend": bool(_sigsuite.MLDSA_AVAILABLE)}
+    if not_run:   # 1.6.0 — SPEC §6.10: a check asked for could not be run here — the COMPLETE receipt travels with the error
+        raise Ap2WriteError(not_run[0], receipt=receipt)
+    return receipt
 
 
 # ────────────────────────────────────────────────────────── CLI
@@ -1696,6 +1913,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
                    help="pin a producer public key as <sig_alg>=<base64> (e.g. ed25519=…, ml-dsa-65=…); may repeat. With any pin, an unpinned producer is not authentic")
     v.add_argument("--require-producer", action="store_true", help="policy: a valid producer signature is required")
     v.add_argument("--require-pq", action="store_true", help="policy: a valid, PINNED post-quantum producer signature is required")
+    v.add_argument("--trust-set-complete", action="store_true", help="policy (1.6.0): the pinned producer keys are the COMPLETE trust set — a producer key outside it is then also a policy failure (policy.unmet trust_set_complete); never turns a key_unresolved into signature_invalid")
     v.add_argument("--require-anchor", action="store_true", help="policy: the RFC 3161 anchor must be present and BOUND to this pack (status granted, messageImprint = digest); with --tsa-cert also TSA-verified")
     v.add_argument("--trust-anchor", help="PEM trust anchor: validate the artifact x5c chain with openssl verify. Without it every key is self-asserted (offline, a certificate proves only that the signer wrote it) — the JS verifier cannot validate chains and reports chain_verified null (declared)")
     v.add_argument("--min-anchors", help="policy: at least N distinct anchors must verify (SPEC §3.3; --require-anchor alone is 1)")
@@ -1703,7 +1921,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     # 1.1.0: one CLI grammar with the sibling verifiers — "" or a flag as a value, "--", -h/--help, a value on a boolean flag,
     # an abbreviated flag = usage (exit 2, no verdict); the file path itself must not be "" or flag-like
-    if "--" in raw or any(x in ("-h", "--help") for x in raw) or any(x.split("=", 1)[0] in ("--require-producer", "--require-pq", "--require-anchor") and "=" in x for x in raw):
+    if "--" in raw or any(x in ("-h", "--help") for x in raw) or any(x.split("=", 1)[0] in ("--require-producer", "--require-pq", "--require-anchor", "--trust-set-complete") and "=" in x for x in raw):
         p.error("unexpected argument")
     i = 0
     while i < len(raw):
@@ -1788,9 +2006,17 @@ def _main(argv: Optional[List[str]] = None) -> int:
         try:
             r = verify_evidence(a.evidence, trusted_producer_keys=trusted, require_pq=a.require_pq,
                                 require_producer=a.require_producer, require_anchor=a.require_anchor, tsa_cert=a.tsa_cert,
-                                trust_anchor=a.trust_anchor, min_anchors=min_anchors)
-        except Ap2WriteError as e:   # a check could not be run here: no verdict, never "not valid"
-            return _not_written(str(e))
+                                trust_anchor=a.trust_anchor, min_anchors=min_anchors, trust_set_complete=a.trust_set_complete)
+        except Ap2WriteError as e:   # a check could not be run here: never "not valid"
+            if e.receipt is None:
+                return _not_written(str(e))
+            # 1.6.0 — SPEC §6.10: the COMPLETE receipt (that subject not_evaluated/instrument_failure, the others evaluated)
+            # and exit 74; a receipt that cannot be written is 74 too, with "receipt not written" on stderr (SPEC §10)
+            why = _emit(json.dumps(e.receipt, indent=1))
+            if why is not None:
+                return _not_written(why)
+            _say(f"check not run here: {e}\n")
+            return EX_IOERR
         why = _emit(json.dumps(r, indent=1))
         if why is not None:   # 1.5.2: never the verdict's 0/1 when the receipt did not reach stdout whole
             return _not_written(why)

@@ -15,5 +15,11 @@
   "valid": false
  },
  "policy": {},
+ "states": {
+  "admission": "refused",
+  "policy": null,
+  "refusal_class": "unknown_member",
+  "subjects": null
+ },
  "vector": "unknown_key_top_level"
 }

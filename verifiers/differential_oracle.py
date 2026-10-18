@@ -105,16 +105,51 @@ DECLARED = {
         "js": (True, True, True, False, None, None, False, False, None, None, None, None, True, True, None, ("x5c_header",), 0, None, (), _LEAF_SELF)}}
 
 
+# 1.6.0 — SPEC §6.9: the same one cause in the new fields. Under --tsa-cert the JS verifier states time_anchor
+# not_evaluated/instrument_failure (it cannot check a TSA signature) where the reference states verified or tsa_invalid, and
+# so names the policy it then fails; under --trust-anchor the JS verifier is a usage error (exit 2, no receipt: a flag that
+# would do nothing is refused), so only the reference's verdict is declared. Measured 2026-10-18 and frozen here.
+_SC, _HB = ("sealed_content", "verified", ()), ("holder_binding", "not_evaluated", ("not_present",))
+_P2, _I2 = ("producer_signature", "not_evaluated", ("self_asserted", "self_asserted")), ("issuer_identity", "not_evaluated", ("self_asserted", "self_asserted"))
+_NP = lambda s: (s, "not_evaluated", ("not_present",))  # noqa: E731
+_ADM = ("admitted", None)
+DECLARED_160 = {
+    "vector-anchors_two_valid-tsa-cert-bundle": {
+        "py_new": _ADM + ((_SC, _HB, ("time_anchor", "verified", ()), _P2, _I2), (True, ()), True),
+        "js_new": _ADM + ((_SC, _HB, ("time_anchor", "not_evaluated", ("instrument_failure", "instrument_failure")), _P2, _I2), (False, ("min_anchors",)), True)},
+    "vector-anchors_two_valid-tsa-cert-one": {
+        "py_new": _ADM + ((_SC, _HB, ("time_anchor", "not_evaluated", ("tsa_invalid",)), _P2, _I2), (False, ("min_anchors",)), True),
+        "js_new": _ADM + ((_SC, _HB, ("time_anchor", "not_evaluated", ("instrument_failure", "instrument_failure")), _P2, _I2), (False, ("min_anchors",)), True)},
+    "vector-anchor_valid-tsa-cert": {
+        "py_new": _ADM + ((_SC, _HB, ("time_anchor", "verified", ()), _P2, _I2), (True, ()), True),
+        "js_new": _ADM + ((_SC, _HB, ("time_anchor", "not_evaluated", ("instrument_failure",)), _P2, _I2), (False, ("require_anchor",)), True)},
+    "x5c-ca-issued-with-trust-anchor": {"js": "USAGE",
+        "py_new": _ADM + ((_SC, _HB, _NP("time_anchor"), _NP("producer_signature"), ("issuer_identity", "verified", ("ca_certified",))), (True, ()), True)},
+    "mixed-self-asserted-mandate-plus-chained-artifact": {"js": "USAGE",
+        "py_new": _ADM + ((_SC, _HB, _NP("time_anchor"), _NP("producer_signature"), ("issuer_identity", "not_evaluated", ("self_asserted",))), (True, ()), True)},
+    "x5c-self-signed-with-trust-anchor": {"js": "USAGE",
+        "py_new": _ADM + ((_SC, _HB, _NP("time_anchor"), _NP("producer_signature"), ("issuer_identity", "not_evaluated", ("chain_unresolved",))), (True, ()), True)}}
+for _k, _v in DECLARED_160.items():
+    DECLARED[_k].update(_v)
+_FORGED = (False, True, True, True, True, None, True, True, True, True, True, "20260922100000Z", False, True, None, ("jwk_header",), 0, None, (), ())
+DECLARED["tsr-self-forged-tsa-cert"] = {   # 1.6.0: agreed on every 1.5.x field; the reference names the TSA failure, JS its incapacity
+    "py": _FORGED, "js": _FORGED,
+    "py_new": _ADM + ((_SC, _HB, ("time_anchor", "not_evaluated", ("tsa_invalid",)), _P2, _I2), (False, ("require_anchor",)), True),
+    "js_new": _ADM + ((_SC, _HB, ("time_anchor", "not_evaluated", ("instrument_failure",)), _P2, _I2), (False, ("require_anchor",)), True)}
+
+
 def _matches_declared(name, py, js):
     """A declared divergence matches when every compared field agrees with the declaration, except the freshly generated
     x5c leaf identity (new keys each run) — which must still be IDENTICAL between the two verifiers."""
     d = DECLARED[name]
-    if py[-1] != js[-1]:
+    if d["js"] == "USAGE":   # 1.6.0: JS refuses --trust-anchor (usage, exit 2): only the reference's verdict is declared
+        return js == ("USAGE",) and py[:19] == d["py"][:19] and py[20:] == d["py_new"]
+    if py[19] != js[19]:
         return False
-    return py[:-1] == d["py"][:-1] and js[:-1] == d["js"][:-1]
+    return py[:19] == d["py"][:19] and js[:19] == d["js"][:19] and py[20:] == d["py_new"] and js[20:] == d["js_new"]
 
 
-def flags_for(policy):
+def flags_for(policy, vdir=None):
     fl = []
     for alg, keys in (policy.get("trusted_producer_keys") or {}).items():
         for k in ([keys] if isinstance(keys, str) else keys):
@@ -124,7 +159,32 @@ def flags_for(policy):
             fl.append("--" + name.replace("_", "-"))
     if "min_anchors" in policy:   # 1.5.0 — SPEC §3.3
         fl += ["--min-anchors", str(policy["min_anchors"])]
+    if policy.get("trust_set_complete"):   # 1.6.0 — SPEC §6.9
+        fl.append("--trust-set-complete")
+    for k in ("tsa_cert", "trust_anchor"):   # 1.6.0: files of the vector set
+        if k in policy:
+            fl += ["--" + k.replace("_", "-"), os.path.join(vdir, policy[k])]
     return fl
+
+
+def openssl_vector_divergence(policy, py, js):
+    """1.6.0: the declared divergence of a VECTOR whose policy needs openssl (the reference's alone), stated as a rule, not a
+    frozen tuple — under trust_anchor the JS verifier is a usage error; under tsa_cert it states time_anchor
+    not_evaluated/instrument_failure (one reason per token) and so may count fewer anchors and miss the anchor policy:
+    every other compared field must be equal. (The reference's own verdict on these vectors is checked by the conformance
+    runner against the expected file.)"""
+    if "trust_anchor" in policy:
+        return js == ("USAGE",) and py[0] in (True, False)
+    if "tsa_cert" not in policy or len(js) != len(py) or js[20] != py[20] or js[21] != py[21]:
+        return False
+    sj, sp = dict((k, (a, b)) for k, a, b in js[22]), dict((k, (a, b)) for k, a, b in py[22])
+    if any(sj[k] != sp[k] for k in sp if k != "time_anchor"):
+        return False
+    st, reasons = sj["time_anchor"]
+    if st != "not_evaluated" or not reasons or set(reasons) != {"instrument_failure"}:
+        return False
+    loose = {0, 12, 16}   # valid, policy_ok, anchors_verified: what the uncounted anchors change
+    return all(py[i] == js[i] for i in range(20) if i not in loose) and py[24] == js[24]
 
 
 def _refused_key(text):
@@ -138,18 +198,25 @@ def _refused_key(text):
 
 
 def run(cmd, path, flags):
+    out = None
     try:
         out = subprocess.run(list(cmd) + [path] + flags, capture_output=True, text=True, timeout=120)
         r = json.loads(out.stdout); prod = r.get("producer_signatures") or {}; ts = r.get("rfc3161") or {}
         leaves = tuple(tuple((a.get("x5c_leaf") or {}).get(f) for f in ("subject", "issuer", "serial", "not_valid_before", "not_valid_after", "sha256"))
                        for a in (r.get("artifacts") or []) if a.get("x5c_leaf"))   # identity only: chain_verified is the declared divergence, compared at top level
+        st = r.get("states")   # 1.6.0 — SPEC §6.9: admission, refusal_class, every subject's state and reasons (not `detail`, free text), policy
+        new = (r.get("admission"), r.get("refusal_class"),
+               None if st is None else tuple((k, v.get("state"), tuple(v.get("reasons") or ())) for k, v in st.items()),
+               None if r.get("policy") is None else (r["policy"].get("met"), tuple(r["policy"].get("unmet") or ())), "ok" in prod)
         return (r.get("valid"), r.get("digest_ok"), r.get("bindings_ok"), prod.get("present"), prod.get("ok"), prod.get("trusted"),
                 r.get("pq_protected"), ts.get("claimed"), ts.get("verified"), ts.get("granted"), ts.get("imprint_ok"), ts.get("gen_time"),
                 r.get("policy_ok"), r.get("self_asserted_only"), r.get("chain_verified"), tuple(r.get("provenance_classes") or ()),
                 r.get("anchors_verified"), _refused_key(r.get("refused")),
                 tuple((a.get("mechanism"), a.get("verified"), a.get("granted"), a.get("imprint_ok"), a.get("gen_time")) for a in (r.get("anchors") or [])),
-                leaves)
+                leaves) + new
     except Exception:  # noqa: BLE001
+        if out is not None and out.returncode == 2 and out.stdout == "":   # 1.6.0: a usage error (JS --trust-anchor), named as such
+            return ("USAGE",)
         return ("NONJSON/CRASH:" + os.path.basename(cmd[-1] if cmd[-1] != "verify" else cmd[-2]),) * len(KEYS)   # distinct per verifier: two crashes never agree
 
 
@@ -171,12 +238,17 @@ def refusal_of(cmd, path):
     return "valid" if r.get("valid") else str(r.get("refused"))
 
 
+OPENSSL_VECTORS = {}   # 1.6.0: vector cases whose policy needs openssl, filled by build_cases
+
+
 def build_cases(d):
     cases = {}
     vdir = os.path.join(ROOT, "spec", "vectors", "ap2")
     for exp_path in sorted(glob.glob(os.path.join(vdir, "*.expected.json"))):
         exp = _load(exp_path); name = exp["vector"]
-        cases["vector-" + name] = (os.path.join(vdir, name + ".json"), flags_for(exp.get("policy", {})))
+        cases["vector-" + name] = (os.path.join(vdir, name + ".json"), flags_for(exp.get("policy", {}), vdir))
+        if "tsa_cert" in exp.get("policy", {}) or "trust_anchor" in exp.get("policy", {}):
+            OPENSSL_VECTORS["vector-" + name] = exp["policy"]
     with open(os.path.join(vdir, "valid_signed.json"), encoding="utf-8") as fh:
         base_text = fh.read()
     base = json.loads(base_text)
@@ -499,6 +571,8 @@ def main():
             py, js = run(PY, path, flags), run(JS, path, flags); n += 1
             if name in POSITIVE_CONTROLS and py[0] is not True:   # a positive control that does not verify proves nothing
                 diffs += 1; print(f"  [DIFF] {name:34} positive control did not verify: py={py[:3]}"); continue
+            if name in OPENSSL_VECTORS and openssl_vector_divergence(OPENSSL_VECTORS[name], py, js):
+                declared += 1; print(f"  [DECL] {name:34} py={py[:1]} js={js[:1]}  <- declared (1.6.0 rule): TSA/chain verification is openssl-only"); continue
             if name in DECLARED and _matches_declared(name, py, js):
                 declared += 1; print(f"  [DECL] {name:34} py={py} js={js}  <- declared: " + ("TSA verification" if "tsa-cert" in name else "chain validation") + " is openssl-only"); continue
             ok = py == js; diffs += 0 if ok else 1
@@ -518,8 +592,8 @@ def main():
             print(f"  [{'OK ' if ok else 'DIFF'}] {name:34} expect {want}: {row}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    if declared != len(DECLARED):   # r2: a declared divergence that stops appearing (e.g. openssl absent) is reported, not silently counted OK
-        print(f"  [WARN] declared divergences observed: {declared}/{len(DECLARED)} — the declaration no longer matches this machine"); diffs += 1
+    if declared != len(DECLARED) + len(OPENSSL_VECTORS):   # r2: a declared divergence that stops appearing (e.g. openssl absent) is reported, not silently counted OK
+        print(f"  [WARN] declared divergences observed: {declared}/{len(DECLARED) + len(OPENSSL_VECTORS)} — the declaration no longer matches this machine"); diffs += 1
     n_vec = sum(1 for k in cases if k.startswith("vector-")); n_cli = len(CLI)
     n_pos = sum(1 for k in cases if k in POSITIVE_CONTROLS)
     print(f"decomposition: {n_vec} vector runs + {len(cases) - n_vec - n_pos} hostile files + {n_pos} positive controls + {n_cli} CLI cases = {n}")

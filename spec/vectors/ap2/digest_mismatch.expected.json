@@ -20,5 +20,50 @@
   "require_producer": false,
   "trusted_producer_keys": null
  },
+ "requires_backend": [
+  "ml-dsa-65"
+ ],
+ "states": {
+  "admission": "admitted",
+  "policy": {
+   "met": true,
+   "unmet": []
+  },
+  "refusal_class": null,
+  "subjects": {
+   "holder_binding": {
+    "reasons": [
+     "not_present"
+    ],
+    "state": "not_evaluated"
+   },
+   "issuer_identity": {
+    "reasons": [
+     "self_asserted",
+     "self_asserted"
+    ],
+    "state": "not_evaluated"
+   },
+   "producer_signature": {
+    "reasons": [
+     "signature_invalid",
+     "signature_invalid"
+    ],
+    "state": "contradicted"
+   },
+   "sealed_content": {
+    "reasons": [
+     "digest_mismatch"
+    ],
+    "state": "contradicted"
+   },
+   "time_anchor": {
+    "reasons": [
+     "not_present"
+    ],
+    "state": "not_evaluated"
+   }
+  }
+ },
  "vector": "digest_mismatch"
 }

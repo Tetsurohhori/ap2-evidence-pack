@@ -1,0 +1,65 @@
+{
+ "description": "anchor_valid's bytes verified with --tsa-cert anchor_probe_tsa.crt, the certificate of the TSA that issued the token: binding and TSA signature verify — time_anchor verified (SPEC §3.2, §6.9). Needs openssl.",
+ "normative": {
+  "anchors_verified": 1,
+  "bindings_ok": true,
+  "digest_ok": true,
+  "policy_ok": true,
+  "pq_protected": true,
+  "producer_ok": true,
+  "producer_present": true,
+  "producer_trusted": null,
+  "rfc3161_claimed": true,
+  "rfc3161_verified": true,
+  "self_asserted_only": true,
+  "valid": true
+ },
+ "policy": {
+  "tsa_cert": "anchor_probe_tsa.crt"
+ },
+ "requires": [
+  "openssl"
+ ],
+ "requires_backend": [
+  "ml-dsa-65"
+ ],
+ "states": {
+  "admission": "admitted",
+  "policy": {
+   "met": true,
+   "unmet": []
+  },
+  "refusal_class": null,
+  "subjects": {
+   "holder_binding": {
+    "reasons": [
+     "not_present"
+    ],
+    "state": "not_evaluated"
+   },
+   "issuer_identity": {
+    "reasons": [
+     "self_asserted",
+     "self_asserted"
+    ],
+    "state": "not_evaluated"
+   },
+   "producer_signature": {
+    "reasons": [
+     "self_asserted",
+     "self_asserted"
+    ],
+    "state": "not_evaluated"
+   },
+   "sealed_content": {
+    "reasons": [],
+    "state": "verified"
+   },
+   "time_anchor": {
+    "reasons": [],
+    "state": "verified"
+   }
+  }
+ },
+ "vector": "time_tsa_verified"
+}

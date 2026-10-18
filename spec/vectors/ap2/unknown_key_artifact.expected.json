@@ -1,10 +1,10 @@
 {
- "description": "The valid pack SEALED with a key nobody defined inside an artifact entry — a claim a relying party could read as evidence. SPEC §9.1: the entry is closed, so it is that artifact's error and the pack is not valid.",
+ "description": "The valid pack SEALED with a key nobody defined inside an artifact entry — a claim a relying party could read as evidence. SPEC §9.1/§6.9 (1.6.0, not additive): a refusal of class unknown_member, as in every other object of §9.1 (1.4.0–1.5.4: an artifact error, so digest_ok, bindings_ok and policy_ok were true and a reader of those fields saw an altered artifact).",
  "normative": {
   "anchors_verified": 0,
   "bindings_ok": false,
-  "digest_ok": true,
-  "policy_ok": true,
+  "digest_ok": false,
+  "policy_ok": false,
   "pq_protected": false,
   "producer_ok": null,
   "producer_present": false,
@@ -15,5 +15,14 @@
   "valid": false
  },
  "policy": {},
+ "report": {
+  "refused": "artifacts[0]: unknown key \"issuer_verified\" (SPEC §9.1)"
+ },
+ "states": {
+  "admission": "refused",
+  "policy": null,
+  "refusal_class": "unknown_member",
+  "subjects": null
+ },
  "vector": "unknown_key_artifact"
 }

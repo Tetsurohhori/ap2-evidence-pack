@@ -1,0 +1,78 @@
+{
+ "description": "unpinned_producer's bytes and pinned set, with --trust-set-complete: the producer keys stay key_unresolved (never signature_invalid, SPEC §6.9) and the declared-complete set adds the disposition policy.unmet trust_set_complete; policy_ok keeps its 1.5.x meaning (the four 1.5.x policy inputs).",
+ "normative": {
+  "anchors_verified": 0,
+  "bindings_ok": true,
+  "digest_ok": true,
+  "policy_ok": true,
+  "pq_protected": false,
+  "producer_ok": true,
+  "producer_present": true,
+  "producer_trusted": false,
+  "rfc3161_claimed": false,
+  "rfc3161_verified": null,
+  "self_asserted_only": true,
+  "valid": false
+ },
+ "policy": {
+  "require_anchor": false,
+  "require_pq": false,
+  "require_producer": false,
+  "trust_set_complete": true,
+  "trusted_producer_keys": {
+   "ed25519": [
+    "k1x7jczT0v9N/WFl8yn00b5iNHW3buvy0vIniQ4yy8s="
+   ],
+   "ml-dsa-65": [
+    "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"
+   ]
+  }
+ },
+ "requires_backend": [
+  "ml-dsa-65"
+ ],
+ "states": {
+  "admission": "admitted",
+  "policy": {
+   "met": false,
+   "unmet": [
+    "trusted_producer_keys",
+    "trust_set_complete"
+   ]
+  },
+  "refusal_class": null,
+  "subjects": {
+   "holder_binding": {
+    "reasons": [
+     "not_present"
+    ],
+    "state": "not_evaluated"
+   },
+   "issuer_identity": {
+    "reasons": [
+     "self_asserted",
+     "self_asserted"
+    ],
+    "state": "not_evaluated"
+   },
+   "producer_signature": {
+    "reasons": [
+     "key_unresolved",
+     "key_unresolved"
+    ],
+    "state": "not_evaluated"
+   },
+   "sealed_content": {
+    "reasons": [],
+    "state": "verified"
+   },
+   "time_anchor": {
+    "reasons": [
+     "not_present"
+    ],
+    "state": "not_evaluated"
+   }
+  }
+ },
+ "vector": "producer_trust_set_complete"
+}

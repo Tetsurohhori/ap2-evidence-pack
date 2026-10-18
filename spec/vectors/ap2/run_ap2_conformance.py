@@ -36,8 +36,18 @@ import ap2_evidence as ap2  # noqa: E402
 sigsuite = ap2._sigsuite   # the signature suite the reference really uses (its ML-DSA-65 backend)
 
 # 1.5.4 — SPEC §7: the closed schema of <name>.expected.json
-EXPECTED_KEYS = {"vector", "description", "policy", "normative", "report", "requires", "requires_backend"}
-POLICY_KEYS = {"trusted_producer_keys", "require_pq", "require_producer", "require_anchor", "min_anchors"}
+EXPECTED_KEYS = {"vector", "description", "policy", "normative", "report", "requires", "requires_backend", "states"}
+POLICY_KEYS = {"trusted_producer_keys", "require_pq", "require_producer", "require_anchor", "min_anchors",
+               "trust_set_complete", "tsa_cert", "trust_anchor"}   # 1.6.0: the last three
+# 1.6.0 — SPEC §6.9/§7: the `states` block every expected file carries (closed, like the rest of the file)
+STATES_KEYS = {"admission", "refusal_class", "subjects", "policy"}
+SUBJECTS = ("sealed_content", "holder_binding", "time_anchor", "producer_signature", "issuer_identity")
+STATE_VALUES = {"verified", "contradicted", "indeterminate", "not_evaluated"}
+REASONS = {"digest_mismatch", "artifact_invalid", "binding_mismatch", "kb_signature_invalid", "sd_hash_mismatch",
+           "not_present", "holder_key_unknown", "token_invalid", "token_missing", "tsa_not_checked", "tsa_invalid",
+           "instrument_failure", "signature_invalid", "self_asserted", "key_unresolved", "backend_missing", "ca_certified",
+           "chain_broken", "chain_unresolved", "no_trust_anchor", "divergence", "absence"}
+UNMET = ("require_producer", "require_pq", "require_anchor", "min_anchors", "trusted_producer_keys", "trust_set_complete")
 REPORT_KEYS = {"ignored", "refused"}
 NORMATIVE_KEYS = {"valid", "digest_ok", "bindings_ok", "policy_ok", "pq_protected", "producer_present", "producer_ok",
                   "producer_trusted", "rfc3161_claimed", "rfc3161_verified", "self_asserted_only", "anchors_verified"}
@@ -65,7 +75,7 @@ def _load_expected(path: str, name: str):
         raise VectorSetError(f"{name}: unreadable expected file ({type(e).__name__}: {e}) (SPEC §7)") from None
 
 
-def check_expected(exp, name: str) -> None:
+def check_expected(exp, name: str, vdir: str = None) -> None:
     def closed(obj, allowed, where):
         if not isinstance(obj, dict):
             raise VectorSetError(f"{name}: {where} must be an object")
@@ -77,7 +87,7 @@ def check_expected(exp, name: str) -> None:
         raise VectorSetError(f"{name}: `vector` must be the file's name and `description` a string")
     closed(exp.get("policy"), POLICY_KEYS, "policy")
     pol = exp["policy"]
-    for k in ("require_pq", "require_producer", "require_anchor"):
+    for k in ("require_pq", "require_producer", "require_anchor", "trust_set_complete"):
         if k in pol and not isinstance(pol[k], bool):
             raise VectorSetError(f"{name}: policy {k} must be a boolean (SPEC §7)")
     if "min_anchors" in pol and not (type(pol["min_anchors"]) is int and pol["min_anchors"] >= 1):
@@ -86,11 +96,38 @@ def check_expected(exp, name: str) -> None:
     if tpk is not None and not (isinstance(tpk, dict) and all(
             isinstance(v, str) or (isinstance(v, list) and v and all(isinstance(x, str) for x in v)) for v in tpk.values())):
         raise VectorSetError(f"{name}: policy trusted_producer_keys must be null or {{sig_alg: key or [keys]}} (SPEC §7)")
+    for k in ("tsa_cert", "trust_anchor"):   # 1.6.0: a file beside the vectors, named without a directory
+        if k in pol and not (isinstance(pol[k], str) and pol[k] and os.path.basename(pol[k]) == pol[k] and os.path.isfile(os.path.join(vdir or _HERE, pol[k]))):
+            raise VectorSetError(f"{name}: policy {k} must name a file of the vector set (SPEC §7)")
     closed(exp.get("normative"), NORMATIVE_KEYS, "normative")
     if set(exp["normative"]) != NORMATIVE_KEYS:
         raise VectorSetError(f"{name}: normative must carry all twelve fields, missing {sorted(NORMATIVE_KEYS - set(exp['normative']))}")
     if "report" in exp:
         closed(exp["report"], REPORT_KEYS, "report")
+    if "states" not in exp:
+        raise VectorSetError(f"{name}: missing the states block (SPEC §7, 1.6.0)")
+    st = exp["states"]
+    closed(st, STATES_KEYS, "states")
+    if set(st) != STATES_KEYS:
+        raise VectorSetError(f"{name}: states must carry {sorted(STATES_KEYS)}")
+    if st["admission"] == "refused":
+        if st["refusal_class"] not in ("format_unsupported", "unknown_member", "malformed") or st["subjects"] is not None or st["policy"] is not None:
+            raise VectorSetError(f"{name}: a refused states block has a refusal_class and null subjects and policy (SPEC §6.9)")
+    elif st["admission"] == "admitted":
+        if st["refusal_class"] is not None:
+            raise VectorSetError(f"{name}: an admitted states block has refusal_class null")
+        closed(st["subjects"], set(SUBJECTS), "states.subjects")
+        if set(st["subjects"]) != set(SUBJECTS):
+            raise VectorSetError(f"{name}: states.subjects must carry {list(SUBJECTS)}")
+        for sname, sv in st["subjects"].items():
+            closed(sv, {"state", "reasons"}, f"states.subjects.{sname}")
+            if sv.get("state") not in STATE_VALUES or not isinstance(sv.get("reasons"), list) or set(sv["reasons"]) - REASONS:
+                raise VectorSetError(f"{name}: states.subjects.{sname} outside the vocabulary of SPEC §6.9")
+        closed(st["policy"], {"met", "unmet"}, "states.policy")
+        if not isinstance(st["policy"].get("met"), bool) or not isinstance(st["policy"].get("unmet"), list) or set(st["policy"]["unmet"]) - set(UNMET):
+            raise VectorSetError(f"{name}: states.policy outside SPEC §6.9")
+    else:
+        raise VectorSetError(f"{name}: states.admission must be admitted or refused")
     for key, known in (("requires", None), ("requires_backend", BACKENDS)):
         if key in exp:
             v = exp[key]
@@ -115,7 +152,30 @@ def _normalize(r: dict) -> dict:
             "anchors_verified": r.get("anchors_verified")}   # 1.5.0 — SPEC §3.3, the twelfth normative field
 
 
-def run(verify_fn=None, honour_requirements: bool = True, backends=None, vector_dir=None) -> dict:
+def states_block(r: dict) -> dict:
+    """1.6.0 — SPEC §7: the part of a receipt the `states` block of an expected file states (`detail` is free text)."""
+    subj = r.get("states")
+    return {"admission": r.get("admission"), "refusal_class": r.get("refusal_class"),
+            "subjects": None if subj is None else {k: {"state": v.get("state"), "reasons": v.get("reasons")} for k, v in subj.items()},
+            "policy": r.get("policy")}
+
+
+def verify_with_policy(verify_fn, pack_path: str, pol: dict, vdir: str) -> dict:
+    """Call a verifier with the policy of an expected file; the 1.6.0 inputs are passed only when the file sets them, so a
+    verifier of an earlier revision is still callable on the earlier vectors."""
+    extra = {}
+    if "min_anchors" in pol:
+        extra["min_anchors"] = pol["min_anchors"]
+    if pol.get("trust_set_complete"):
+        extra["trust_set_complete"] = True
+    for k in ("tsa_cert", "trust_anchor"):
+        if k in pol:
+            extra[k] = os.path.join(vdir, pol[k])
+    return verify_fn(pack_path, trusted_producer_keys=pol.get("trusted_producer_keys"), require_pq=bool(pol.get("require_pq")),
+                     require_producer=bool(pol.get("require_producer")), require_anchor=bool(pol.get("require_anchor")), **extra)
+
+
+def run(verify_fn=None, honour_requirements: bool = True, backends=None, vector_dir=None, tools=None) -> dict:
     """`backends` ({name: bool}) states the backends of the verifier under test when it is not the reference (default:
     the reference's own). `honour_requirements=False` runs every vector whatever it requires — only for measuring what a
     vector depends on (make_vectors_154.py, test_requires_backend_is_the_measured_dependence), never for a claim."""
@@ -133,23 +193,18 @@ def run(verify_fn=None, honour_requirements: bool = True, backends=None, vector_
     for exp_path in exp_paths:
         name = os.path.basename(exp_path)[:-len(".expected.json")]
         exp = _load_expected(exp_path, name)
-        check_expected(exp, name)
+        check_expected(exp, name, vdir)
         if not os.path.isfile(os.path.join(vdir, f"{name}.json")):
             raise VectorSetError(f"{name}: the pack is not a regular file")
-        missing = [t for t in exp.get("requires", []) if not shutil.which(t)]
+        # 1.6.0: `tools` ({name: bool}) states the tools the verifier under test can use when it is not the reference (the JS
+        # verifier calls no openssl: its vectors that need openssl are SKIP, never a pass and never a disagreement)
+        missing = [t for t in exp.get("requires", []) if not (shutil.which(t) if tools is None else tools.get(t, False))]
         missing += [b for b in exp.get("requires_backend", []) if not have[b]]
         if missing and honour_requirements:
             results.append({"vector": name, "status": "SKIP",
                             "note": f"requires {missing} — NOT verified on this machine"})
             continue
-        pol = exp.get("policy", {})
-        receipt = verify_fn(
-            os.path.join(vdir, f"{name}.json"),
-            trusted_producer_keys=pol.get("trusted_producer_keys"),
-            require_pq=bool(pol.get("require_pq")),
-            require_producer=bool(pol.get("require_producer")),
-            require_anchor=bool(pol.get("require_anchor")),
-            **({"min_anchors": pol["min_anchors"]} if "min_anchors" in pol else {}))
+        receipt = verify_with_policy(verify_fn, os.path.join(vdir, f"{name}.json"), exp.get("policy", {}), vdir)
         got = _normalize(receipt)
         want = exp["normative"]
         diffs = {k: {"want": want[k], "got": got.get(k)}
@@ -161,6 +216,9 @@ def run(verify_fn=None, honour_requirements: bool = True, backends=None, vector_
         if "refused" in exp.get("report", {}):   # 1.5.0 (SPEC §7): the exact refusal text, not any refusal
             if receipt.get("refused") != exp["report"]["refused"]:
                 diffs["report.refused"] = {"want": exp["report"]["refused"], "got": receipt.get("refused")}
+        got_states = states_block(receipt)   # 1.6.0 — SPEC §6.9/§7
+        if got_states != exp["states"]:
+            diffs["states"] = {"want": exp["states"], "got": got_states}
         ok = not diffs
         conformant = conformant and ok
         results.append({"vector": name, "status": "PASS" if ok else "FAIL",

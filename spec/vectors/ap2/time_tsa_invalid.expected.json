@@ -1,0 +1,67 @@
+{
+ "description": "anchor_valid's bytes verified with --tsa-cert anchor_probe_tsa2.crt, a certificate of ANOTHER TSA: the binding verifies, the TSA signature does not, so the anchor is not counted (SPEC §3.3) — time_anchor not_evaluated/tsa_invalid (the input is not shown altered: another TSA may have issued it).",
+ "normative": {
+  "anchors_verified": 0,
+  "bindings_ok": true,
+  "digest_ok": true,
+  "policy_ok": true,
+  "pq_protected": true,
+  "producer_ok": true,
+  "producer_present": true,
+  "producer_trusted": null,
+  "rfc3161_claimed": true,
+  "rfc3161_verified": true,
+  "self_asserted_only": true,
+  "valid": true
+ },
+ "policy": {
+  "tsa_cert": "anchor_probe_tsa2.crt"
+ },
+ "requires": [
+  "openssl"
+ ],
+ "requires_backend": [
+  "ml-dsa-65"
+ ],
+ "states": {
+  "admission": "admitted",
+  "policy": {
+   "met": true,
+   "unmet": []
+  },
+  "refusal_class": null,
+  "subjects": {
+   "holder_binding": {
+    "reasons": [
+     "not_present"
+    ],
+    "state": "not_evaluated"
+   },
+   "issuer_identity": {
+    "reasons": [
+     "self_asserted",
+     "self_asserted"
+    ],
+    "state": "not_evaluated"
+   },
+   "producer_signature": {
+    "reasons": [
+     "self_asserted",
+     "self_asserted"
+    ],
+    "state": "not_evaluated"
+   },
+   "sealed_content": {
+    "reasons": [],
+    "state": "verified"
+   },
+   "time_anchor": {
+    "reasons": [
+     "tsa_invalid"
+    ],
+    "state": "not_evaluated"
+   }
+  }
+ },
+ "vector": "time_tsa_invalid"
+}

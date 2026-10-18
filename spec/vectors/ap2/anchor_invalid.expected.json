@@ -33,5 +33,44 @@
  "requires_backend": [
   "ml-dsa-65"
  ],
+ "states": {
+  "admission": "admitted",
+  "policy": {
+   "met": false,
+   "unmet": [
+    "require_anchor"
+   ]
+  },
+  "refusal_class": null,
+  "subjects": {
+   "holder_binding": {
+    "reasons": [
+     "not_present"
+    ],
+    "state": "not_evaluated"
+   },
+   "issuer_identity": {
+    "reasons": [
+     "self_asserted",
+     "self_asserted"
+    ],
+    "state": "not_evaluated"
+   },
+   "producer_signature": {
+    "reasons": [],
+    "state": "verified"
+   },
+   "sealed_content": {
+    "reasons": [],
+    "state": "verified"
+   },
+   "time_anchor": {
+    "reasons": [
+     "token_invalid"
+    ],
+    "state": "contradicted"
+   }
+  }
+ },
  "vector": "anchor_invalid"
 }

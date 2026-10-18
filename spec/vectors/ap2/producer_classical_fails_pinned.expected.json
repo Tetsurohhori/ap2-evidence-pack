@@ -27,5 +27,50 @@
    ]
   }
  },
+ "requires_backend": [
+  "ml-dsa-65"
+ ],
+ "states": {
+  "admission": "admitted",
+  "policy": {
+   "met": false,
+   "unmet": [
+    "require_pq",
+    "trusted_producer_keys"
+   ]
+  },
+  "refusal_class": null,
+  "subjects": {
+   "holder_binding": {
+    "reasons": [
+     "not_present"
+    ],
+    "state": "not_evaluated"
+   },
+   "issuer_identity": {
+    "reasons": [
+     "self_asserted",
+     "self_asserted"
+    ],
+    "state": "not_evaluated"
+   },
+   "producer_signature": {
+    "reasons": [
+     "signature_invalid"
+    ],
+    "state": "contradicted"
+   },
+   "sealed_content": {
+    "reasons": [],
+    "state": "verified"
+   },
+   "time_anchor": {
+    "reasons": [
+     "not_present"
+    ],
+    "state": "not_evaluated"
+   }
+  }
+ },
  "vector": "producer_classical_fails_pinned"
 }

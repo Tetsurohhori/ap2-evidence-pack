@@ -251,7 +251,10 @@ class Corpus:
             vals = UNKNOWN_VALUES if not self.quick else UNKNOWN_VALUES[n % len(UNKNOWN_VALUES):n % len(UNKNOWN_VALUES) + 1]
             for v in vals:
                 e = copy.deepcopy(src); o = self.get(e, locate); o[k] = v
-                cls = unknown_cls; needle = json.dumps(k, ensure_ascii=False) if cls in (REFUSE, ARTERR) and table else None
+                cls = unknown_cls
+                if table is not None and cls in (ARTERR, SIGFAIL):   # 1.6.0 — SPEC §9.1/§6.9 (not additive): an unknown key in an
+                    cls = REFUSE   # artifact entry, its key/kb_jwt/verified_at_build, or a signature entry is a refusal (unknown_member)
+                needle = json.dumps(k, ensure_ascii=False) if cls in (REFUSE, ARTERR) and table else None
                 if cls == ARTERR and not table:   # the header copy: it no longer equals the signed header
                     needle = "header copy"
                 self.add(f"{src_name}/{label}/unknown-key/{json.dumps(k, ensure_ascii=False)}={json.dumps(v)}", self.write(self.finish(e, sealed)), fl, cls, base,
@@ -481,7 +484,9 @@ def judge(rec, r, base):
     a = arts[rec["idx"]] if rec["idx"] is not None and rec["idx"] < len(arts) else {}
     if cls == REFUSE:
         ok = r.get("valid") is False and isinstance(r.get("refused"), str) and (rec["needle"] is None or rec["needle"] in r["refused"])
-        return ok, f"refused={r.get('refused')!r} valid={r.get('valid')}"
+        if rec.get("kind") == "unknown-key" and "admission" in r:   # 1.6.0 — SPEC §6.9: an unknown key is a refusal of class unknown_member
+            ok = ok and r.get("admission") == "refused" and r.get("refusal_class") == "unknown_member" and r.get("states") is None
+        return ok, f"refused={r.get('refused')!r} class={r.get('refusal_class')!r} valid={r.get('valid')}"
     if cls == ARTERR:
         ok = r.get("valid") is False and "error" in a and (rec["needle"] is None or rec["needle"] in a["error"])
         return ok, f"artifact={a.get('error')!r} valid={r.get('valid')} refused={r.get('refused')!r}"

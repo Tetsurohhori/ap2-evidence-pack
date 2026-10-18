@@ -18,5 +18,11 @@
  "report": {
   "refused": "anchors[0]: mechanism \"bitcoin-ots\" is not defined by this revision (SPEC §3.3)"
  },
+ "states": {
+  "admission": "refused",
+  "policy": null,
+  "refusal_class": "format_unsupported",
+  "subjects": null
+ },
  "vector": "anchors_unknown_mechanism"
 }

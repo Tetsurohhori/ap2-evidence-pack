@@ -5,13 +5,15 @@
 // ml-dsa-65 through the Node build's OpenSSL >= 3.5, else SKIP = incomplete, never a pass), policy flags, valid.
 // Acceptance profile of the file (SPEC §3.1): strict UTF-8, no BOM, no duplicate keys, no floats, integers within
 // +/-(2^53-1), nesting <= 512, no lone surrogate escape, 64 MiB bound. A refused file is a receipt with valid=false.
-// Usage: ap2-verify.mjs <evidence.json> [--trusted-producer-key ALG=B64]... [--require-producer] [--require-pq] [--require-anchor] [--min-anchors N] [--tsa-cert PEM] [--trust-anchor PEM]
+// Usage: ap2-verify.mjs <evidence.json> [--trusted-producer-key ALG=B64]... [--require-producer] [--require-pq] [--require-anchor] [--min-anchors N] [--tsa-cert PEM] [--trust-set-complete]
 import { statSync, openSync, fstatSync, readSync, closeSync, writeSync, constants as FS } from "node:fs";
 import { createHash, createPublicKey, verify as cryptoVerify, X509Certificate } from "node:crypto";
 
 const MAX_DEPTH = 512, MAX_BYTES = 64 * 1024 * 1024, SAFE = 2 ** 53 - 1;
 const UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 class Refused extends Error {}
+class UnknownMember extends Refused {}
+class FormatUnsupported extends Refused {}   // 1.6.0: an anchor mechanism a later revision may define   // 1.6.0 — SPEC §9.1/§6.9: a key outside a closed list = a refusal of class unknown_member
 
 // ---- strict JSON parser (keeps number lexemes; refuses what the profile refuses) ----
 function parseStrict(text) {
@@ -99,6 +101,68 @@ function es256Verify(signingInput, signature, jwk) {
   const key = createPublicKey({ key: { kty: "EC", crv: "P-256", x: b64u(x), y: b64u(y) }, format: "jwk" });
   try { return cryptoVerify("sha256", signingInput, { key, dsaEncoding: "ieee-p1363" }, signature); } catch { return false; }
 }
+function checkUnknown(obj, what, allowed) {   // 1.6.0 — SPEC §9.1/§6.9: only the unknown-key rule (the reference's _check_unknown)
+  if (!isObj(obj)) return;
+  const has = allowed instanceof Set ? (k) => allowed.has(k) : (k) => Object.hasOwn(allowed, k);
+  const unknown = Object.keys(obj).filter((k) => !has(k)).sort(byCodePoint);
+  if (unknown.length) throw new UnknownMember(what + ": unknown key " + JSON.stringify(unknown[0]) + " (SPEC §9.1)");
+}
+// ---- 1.6.0 — SPEC §6.9: the five subjects of an admitted pack (the same derivation as the reference's derive_states) ----
+export const STATES_VOCABULARY = "ap2-evidence-pack/states-1";
+const POLICY_UNMET = ["require_producer", "require_pq", "require_anchor", "min_anchors", "trusted_producer_keys", "trust_set_complete"];
+function subject(elements) {   // [state, reason, detail?]: contradicted > not_evaluated/instrument_failure > other not_evaluated > verified
+  const rank = (e) => e[0] === "contradicted" ? 3 : e[1] === "instrument_failure" ? 2 : e[0] === "not_evaluated" ? 1 : 0;
+  let top = elements[0]; for (const e of elements) if (rank(e) > rank(top)) top = e;
+  const state = top[0];
+  const reasons = state === "verified" ? elements.filter((e) => e[1]).map((e) => e[1]) : elements.filter((e) => e[0] !== "verified").map((e) => e[1]);
+  const out = { state, reasons }; const details = elements.filter((e) => e[2]).map((e) => e[2]); if (details.length) out.detail = details.join("; ");
+  return out;
+}
+function anchorElement(r, tsaRequested) {
+  if (r.verified !== true) return ["contradicted", r.imprint_ok === false ? "binding_mismatch" : "token_invalid"];
+  if (!tsaRequested) return ["not_evaluated", "tsa_not_checked"];
+  if (r.tsa_verified === true) return ["verified", null];
+  if (r.tsa_verified === false) return ["not_evaluated", "tsa_invalid"];
+  return ["not_evaluated", "instrument_failure", r.tsa_note ?? "TSA signature not checked by this verifier"];
+}
+function deriveStates({ digestOk, artResults, bindingSetMatch, tsBlock, rfcBlock, anchorResults, tsaRequested, producer, pinned, trustAnchorGiven }) {
+  const sealed = [digestOk ? ["verified", null] : ["contradicted", "digest_mismatch"]];
+  if (!artResults.length) sealed.push(["contradicted", "artifact_invalid", "the pack carries no artifact"]);
+  for (const r of artResults) sealed.push(("error" in r || r.signature_ok !== true || r.claims_match !== true) ? ["contradicted", "artifact_invalid"] : ["verified", null]);
+  if (bindingSetMatch !== null) sealed.push(bindingSetMatch ? ["verified", null] : ["contradicted", "binding_mismatch"]);   // recomputed whenever every signature and claims verified
+  const verifiedArts = artResults.filter((r) => !("error" in r));
+  const notSeen = verifiedArts.length === artResults.length ? null : "artifacts that are errors are stated in sealed_content only";
+  let holder = [];
+  for (const r of verifiedArts) { const kb = r.kb_jwt ?? {}; if (!kb.present) continue;
+    if (kb.verified === true) holder.push(["verified", null]);
+    else if (kb.verified === false) holder.push(["contradicted", kb.signature_ok !== true ? "kb_signature_invalid" : "sd_hash_mismatch"]);
+    else holder.push(["not_evaluated", "holder_key_unknown"]); }
+  if (!holder.length) holder = [["not_evaluated", "not_present", notSeen]];
+  let time = [];
+  if (tsBlock.anchored) time.push(typeof tsBlock.tsr_b64 === "string" ? anchorElement(rfcBlock, tsaRequested) : ["contradicted", "token_missing"]);
+  for (const r of anchorResults) time.push(anchorElement(r, tsaRequested));
+  if (!time.length) time = [["not_evaluated", "not_present"]];
+  let prod = [];
+  if (!producer.present) prod = [["not_evaluated", "not_present"]];
+  else {
+    for (const e of producer.signatures ?? []) {
+      if (e.status === "FAIL") prod.push(["contradicted", "signature_invalid"]);
+      else if (e.status === "SKIP") prod.push(["not_evaluated", "backend_missing"]);
+      else if (!pinned) prod.push(["not_evaluated", "self_asserted"]);
+      else if (e.key_trusted === true) prod.push(["verified", null]);
+      else prod.push(["not_evaluated", "key_unresolved"]); }
+    if (!(producer.signatures ?? []).length) prod.push(["contradicted", "signature_invalid", "the producer block carries no signature entry"]);
+    else if (producer.scheme_ok !== true) prod.push(["contradicted", "signature_invalid", "scheme " + JSON.stringify(producer.scheme ?? null) + " does not match its entries (SPEC §5)"]);
+  }
+  let issuer = [];
+  for (const r of verifiedArts) {
+    if (r.provenance_class !== "x5c_header") issuer.push(["not_evaluated", "self_asserted"]);
+    else if (!trustAnchorGiven) issuer.push(["not_evaluated", "no_trust_anchor"]);
+    else issuer.push(["not_evaluated", "instrument_failure", "x5c chain not checked by this verifier"]);   // unreachable: --trust-anchor is a usage error here
+  }
+  if (!issuer.length) issuer = [["not_evaluated", "not_present", notSeen ?? "the pack carries no artifact"]];
+  return { sealed_content: subject(sealed), holder_binding: subject(holder), time_anchor: subject(time), producer_signature: subject(prod), issuer_identity: subject(issuer) };
+}
 function verifyKbJwt(parsed, resolved) {
   const kb = parsed.kbJwt; if (!kb) return { present: false };
   const seg = kb.split("."); if (seg.length !== 3) throw new Refused("kb-jwt must have 3 dot-separated segments");
@@ -171,7 +235,7 @@ function entryShapeNote(entry) {   // SPEC §9.1 FAIL entry: the same note as th
 function checkClosed(obj, what, allowed) {   // SPEC §9.1 — the same three messages as the reference's _check_closed
   if (!isObj(obj)) throw new Refused(what + " must be an object (SPEC §9.1)");
   const unknown = Object.keys(obj).filter((k) => !Object.hasOwn(allowed, k)).sort(byCodePoint);   // 1.4.1: the first by code point, as the reference
-  if (unknown.length) throw new Refused(what + ": unknown key " + JSON.stringify(unknown[0]) + " (SPEC §9.1)");
+  if (unknown.length) throw new UnknownMember(what + ": unknown key " + JSON.stringify(unknown[0]) + " (SPEC §9.1)");
   for (const [k, [[pred, desc], required]] of Object.entries(allowed)) {
     if (k in obj) { if (!pred(obj[k])) throw new Refused(what + ": " + k + " must be " + desc + " (SPEC §9.1)"); }
     else if (required) throw new Refused(what + ": missing " + k + " (SPEC §9.1)"); }
@@ -328,13 +392,15 @@ function readEvidenceBytes(path) {
 export function verifyEvidence(path, opts = {}) {
   if (opts.minAnchors !== undefined && opts.minAnchors !== null && !(Number.isSafeInteger(opts.minAnchors) && opts.minAnchors >= 1))   // SPEC §3.3: an integer >= 1 —
     throw new TypeError("minAnchors must be an integer >= 1 (got " + String(opts.minAnchors) + ")");   // NaN once disabled the policy in silence
-  const refuse = (m) => ({ digest_ok: false, artifacts: [], producer_signatures: { present: false, pq_protected: false, trusted: null }, pq_protected: false, bindings_ok: false, rfc3161: { claimed: false, verified: null }, anchors: [], anchors_verified: 0, provenance_classes: [], self_asserted_only: true, chain_verified: null, policy_ok: false, valid: false, honest_scope: null, refused: m });   // r8: the honesty flag is fail-closed inside a refusal too
+  if (opts.trustAnchor !== undefined && opts.trustAnchor !== null) throw new TypeError("trustAnchor: this verifier cannot validate x5c chains (SPEC §6 step 7) — a flag that does nothing is refused (1.6.0)");
+  // 1.6.0 — SPEC §6.9: every refusal names its class; a refused pack receives no states and no policy
+  const refuse = (m, cls = "malformed") => ({ digest_ok: false, artifacts: [], producer_signatures: { present: false, ok: null, pq_protected: false, trusted: null }, pq_protected: false, bindings_ok: false, rfc3161: { claimed: false, verified: null }, anchors: [], anchors_verified: 0, provenance_classes: [], self_asserted_only: true, chain_verified: null, policy_ok: false, valid: false, honest_scope: null, refused: m, admission: "refused", refusal_class: cls, states_vocabulary: STATES_VOCABULARY, states: null, policy: null, mldsa_backend: HAVE_MLDSA });  // r8: the honesty flag is fail-closed inside a refusal too
   let ev; try { const raw = readEvidenceBytes(path); if (raw === null) return refuse("evidence file exceeds bound"); const text = UTF8.decode(raw); if (text.startsWith("﻿")) return refuse("BOM"); ev = parseStrict(text); } catch (e) { return refuse(String(e.message ?? e)); }
   if (ev === null || typeof ev !== "object" || Array.isArray(ev)) return refuse("not a JSON object");
   // shape of the top-level fields (SPEC §1), the same refusals as the reference
-  if (ev.evidence_format !== EVIDENCE_FORMAT) return refuse("evidence_format must be " + JSON.stringify(EVIDENCE_FORMAT));   // r5: a "…/2.0" pack was verified under the 1.0 rules
+  if (ev.evidence_format !== EVIDENCE_FORMAT) return refuse("evidence_format must be " + JSON.stringify(EVIDENCE_FORMAT), "format_unsupported");   // r5: a "…/2.0" pack was verified under the 1.0 rules
   for (const f of ["subject", "created_utc", "honest_scope"]) if (typeof ev[f] !== "string") return refuse(f + " must be a string (SPEC §1)");
-  if (createHash("sha256").update(Buffer.from(ev.honest_scope, "utf8")).digest("hex") !== HONEST_SCOPE_SHA256) return refuse("honest_scope does not match the canonical scope of this evidence_format (SPEC §1)");   // r8: the receipt used to reprint any scope the file carried
+  if (createHash("sha256").update(Buffer.from(ev.honest_scope, "utf8")).digest("hex") !== HONEST_SCOPE_SHA256) return refuse("honest_scope does not match the canonical scope of this evidence_format (SPEC §1)", "format_unsupported");   // r8: the receipt used to reprint any scope the file carried
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(ev.created_utc)) return refuse("created_utc must be ISO-8601 UTC, YYYY-MM-DDTHH:MM:SSZ (SPEC §1)");   // r6
   if (!Array.isArray(ev.artifacts) || ev.artifacts.some((a) => a === null || typeof a !== "object" || Array.isArray(a))) return refuse("artifacts must be a list of objects");
   const names = ev.artifacts.map((a) => a.name); if (names.some((n) => typeof n !== "string" || !n)) return refuse("artifacts[].name must be a non-empty string");   // r3
@@ -352,9 +418,14 @@ export function verifyEvidence(path, opts = {}) {
       if (!isObj(an)) throw new Refused("anchors[" + i + "] must be an object (SPEC §9.1)");
       if (!Object.hasOwn(an, "mechanism")) throw new Refused("anchors[" + i + "]: missing mechanism (SPEC §9.1)");
       if (typeof an.mechanism !== "string") throw new Refused("anchors[" + i + "]: mechanism must be a string (SPEC §9.1)");
-      if (!ANCHOR_MECHANISMS.includes(an.mechanism)) throw new Refused("anchors[" + i + "]: mechanism " + JSON.stringify(an.mechanism) + " is not defined by this revision (SPEC §3.3)");
+      if (!ANCHOR_MECHANISMS.includes(an.mechanism)) throw new FormatUnsupported("anchors[" + i + "]: mechanism " + JSON.stringify(an.mechanism) + " is not defined by this revision (SPEC §3.3)");
       checkClosed(an, "anchors[" + i + "]", ANCHOR_RFC3161_KEYS); });
-  } catch (e) { return refuse(String(e.message ?? e)); }
+    // 1.6.0 — SPEC §9.1/§6.9 (not additive): an unknown key in an artifact entry (and its key, kb_jwt, verified_at_build) or in a
+    // producer-signature entry is a refusal of class unknown_member; a wrong type or a missing key stays an artifact error / FAIL entry
+    ev.artifacts.forEach((a, i) => { checkUnknown(a, "artifacts[" + i + "]", ARTIFACT_KEYS);
+      for (const [sub, keys] of [["key", KEY_KEYS], ["kb_jwt", KB_COPY_KEYS], ["verified_at_build", VAB_KEYS]]) checkUnknown(a[sub], "artifacts[" + i + "]." + sub, keys); });
+    const sigs = ev.producer_signatures?.signatures; if (Array.isArray(sigs)) sigs.forEach((e, i) => checkUnknown(e, "producer_signatures.signatures[" + i + "]", ENTRY_KEYS));
+  } catch (e) { return refuse(String(e.message ?? e), e instanceof UnknownMember ? "unknown_member" : e instanceof FormatUnsupported ? "format_unsupported" : "malformed"); }
   const e2 = Object.create(null); for (const k of Object.keys(ev)) if (!DIGEST_EXCLUDED.includes(k)) e2[k] = ev[k];
   const recomputed = sha256(Buffer.from(canon(e2), "utf-8")).toString("hex"); const digestOk = recomputed === ev.evidence_digest_sha256;
   const artResults = []; let allOk = true; const forBindings = [];
@@ -382,6 +453,11 @@ export function verifyEvidence(path, opts = {}) {
     } catch (e) { artResults.push({ name: a?.name, error: String(e.message ?? e) }); allOk = false; }
   }
   const asSet = (l) => l.map((b) => canon(b)).sort().join("\n");   // r4: binding SET (SPEC §4) — Object.keys enumerates index keys first, so the scan order is not the reference's
+  // 1.6.0 — SPEC §6.9: the binding set as an element of sealed_content, recomputed whenever every artifact's signature and
+  // claims verified (also when a KB-JWT failed, where bindings_ok is false by §6 step 3 without a recomputation)
+  let bindingSetMatch = null;
+  if (artResults.length && forBindings.length === artResults.length && artResults.every((r) => r.signature_ok === true && r.claims_match === true)) {
+    try { bindingSetMatch = asSet(findBindings(forBindings)) === asSet(ev.bindings ?? []); } catch { bindingSetMatch = false; } }
   const bindingsOk = allOk ? asSet(findBindings(forBindings)) === asSet(ev.bindings ?? []) : false;   // `bindings` absent = [] in both; null is refused above
   const ts = ev.rfc3161_timestamp ?? {}; let rfc = { claimed: Boolean(ts.anchored), verified: null };   // `anchored` is a boolean by the shape check above
   if (ts.anchored && typeof ts.tsr_b64 === "string") rfc = { claimed: true, ...verifyRfc3161(ts.tsr_b64, recomputed), tsa_verified: null };   // BINDING only (status granted + messageImprint == digest, SPEC §3.2); TSA signature/chain: this verifier cannot (no openssl) -> tsa_verified null = incomplete under --tsa-cert
@@ -394,33 +470,44 @@ export function verifyEvidence(path, opts = {}) {
   const pairs = (rfc.claimed ? [[rfc, ts.tsr_b64]] : []).concat(anchorResults.map((r, i) => [r, ev.anchors[i].tsr_b64]));
   for (const [r, tok] of pairs) if (r.verified === true && (!opts.tsaCert || r.tsa_verified === true)) counted.add(tstInfoHex(tok));
   const anchorsVerified = counted.size;
+  const rfcBlock = rfc;   // 1.6.0: the block's own result, before the §3.3 aggregate
   if (anchorResults.length) rfc = { ...rfc, claimed: true, verified: (rfc.verified === false || anchorResults.some((x) => x.verified !== true)) ? false : true };
   const classes = [...new Set(artResults.map((r) => r.provenance_class).filter(Boolean))].sort(cmp);   // r5: by code point, as the reference (default sort is by UTF-16 code unit)
   let producer; const prod = ev.producer_signatures;
   if (prod) { const pv = verifyProducerBlock(prod, Buffer.from(recomputed, "ascii"), opts.trusted ?? null); producer = { present: true, scheme: prod.scheme, scheme_ok: pv.scheme_ok, ok: pv.ok, incomplete: pv.incomplete, pq_protected: pv.pq_protected, trusted: pv.trusted, signatures: pv.results };
     if (!pv.ok) allOk = false; if ((opts.trusted ?? null) !== null && pv.trusted !== true) allOk = false; }
-  else producer = { present: false, pq_protected: false, trusted: null };
-  let policyOk = true; if (opts.requireProducer && !(producer.present && producer.ok)) policyOk = false;
-  if (opts.requirePq && !(producer.pq_protected && producer.trusted === true)) policyOk = false;
-  const need = Math.max(opts.requireAnchor ? 1 : 0, opts.minAnchors ?? 0);   // SPEC §3.3: require_anchor alone is min_anchors = 1
-  if (need && anchorsVerified < need) policyOk = false;   // under --tsa-cert nothing counts here (no openssl): not a pass (declared)
+  else producer = { present: false, ok: null, pq_protected: false, trusted: null };   // 1.6.0: `ok` always present
+  // 1.6.0 — SPEC §6.9: each requirement not met is NAMED; policy_ok keeps its 1.5.x meaning, policy.met also covers the pinned set
+  const unmet = [];
+  if (opts.requireProducer && !(producer.present && producer.ok)) unmet.push("require_producer");
+  if (opts.requirePq && !(producer.pq_protected && producer.trusted === true)) unmet.push("require_pq");
+  if (opts.requireAnchor && anchorsVerified < 1) unmet.push("require_anchor");
+  if (opts.minAnchors !== undefined && opts.minAnchors !== null && anchorsVerified < opts.minAnchors) unmet.push("min_anchors");   // under --tsa-cert nothing counts here (no openssl): not a pass (declared)
+  const policyOk = unmet.length === 0;
+  if ((opts.trusted ?? null) !== null && producer.present && producer.trusted !== true) unmet.push("trusted_producer_keys");
+  const states = deriveStates({ digestOk, artResults, bindingSetMatch, tsBlock: ts, rfcBlock, anchorResults, tsaRequested: Boolean(opts.tsaCert),
+    producer, pinned: (opts.trusted ?? null) !== null, trustAnchorGiven: false });
+  if (opts.trustSetComplete && states.producer_signature.reasons.includes("key_unresolved")) unmet.push("trust_set_complete");
   return { digest_ok: digestOk, artifacts: artResults, producer_signatures: producer, pq_protected: producer.pq_protected ?? false, bindings_ok: bindingsOk, rfc3161: rfc, anchors: anchorResults, anchors_verified: anchorsVerified, provenance_classes: classes,
     // r10: ANY — one reconciled artifact must not clear the flag for the others; r7: a label alone never clears it,
     // a missing class is a refusal; r8: this verifier cannot validate x5c chains, so chain_verified is always null (declared)
     self_asserted_only: artResults.length === 0 || artResults.some((r) => r.self_asserted !== false), chain_verified: null, policy_ok: policyOk,
-    valid: Boolean(artResults.length && digestOk && allOk && bindingsOk && rfc.verified !== false && policyOk), honest_scope: ev.honest_scope ?? null, mldsa_backend: HAVE_MLDSA };
+    valid: Boolean(artResults.length && digestOk && allOk && bindingsOk && rfc.verified !== false && policyOk), honest_scope: ev.honest_scope ?? null,
+    admission: "admitted", refusal_class: null, states_vocabulary: STATES_VOCABULARY, states, policy: { met: unmet.length === 0, unmet: POLICY_UNMET.filter((u) => unmet.includes(u)) },
+    mldsa_backend: HAVE_MLDSA };
 }
 function main(argv) {
   // 1.5.2 review: a usage line that stderr does not take (/dev/full) is 74, as in the Python CLI (console.error dropped the error and exited 2)
-  const usage = () => { try { writeAllSync(2, "usage: ap2-verify.mjs <evidence.json> [--trusted-producer-key ALG=B64]... [--require-producer] [--require-pq] [--require-anchor] [--min-anchors N] [--tsa-cert PEM] [--trust-anchor PEM]\n"); } catch { process.exit(EX_IOERR); } process.exit(2); };
+  const usage = () => { try { writeAllSync(2, "usage: ap2-verify.mjs <evidence.json> [--trusted-producer-key ALG=B64]... [--require-producer] [--require-pq] [--require-anchor] [--min-anchors N] [--tsa-cert PEM] [--trust-set-complete]\n"); } catch { process.exit(EX_IOERR); } process.exit(2); };
   const a = argv.slice(2); const opts = { trusted: null }; let path = null;
   for (let i = 0; i < a.length; i++) { let tok = a[i], eqv = null; const eq = tok.indexOf("="); if (eq > 0 && tok.startsWith("--")) { eqv = tok.slice(eq + 1); tok = tok.slice(0, eq); }
     const nx = () => { const v = eqv !== null ? eqv : a[++i]; if (v === undefined || v === "" || v.startsWith("-")) usage(); return v; };
     if (tok === "--trusted-producer-key") { const v = nx(); const k = v.indexOf("="); if (k <= 0 || k === v.length - 1) usage(); opts.trusted = opts.trusted ?? Object.create(null); (opts.trusted[v.slice(0, k)] ??= []).push(v.slice(k + 1)); }   // r2: a null-prototype table, so "constructor=…" is a pin like any other
     else if (tok === "--tsa-cert") opts.tsaCert = nx();
     else if (tok === "--min-anchors") { const v = nx(); if (!/^[1-9][0-9]{0,5}$/.test(v)) usage(); opts.minAnchors = Number(v); }   // 1.5.0 — the reference's grammar
-    else if (tok === "--trust-anchor") { nx(); }   // r8: accepted for one CLI grammar; this verifier cannot validate x5c chains -> chain_verified stays null (declared)
+    else if (tok === "--trust-anchor") { nx(); usage(); }   // 1.6.0: this verifier cannot validate x5c chains; a flag accepted that does nothing is a usage error (r8 accepted it and reported chain_verified null)
     else if (tok === "--require-producer" && eqv === null) opts.requireProducer = true; else if (tok === "--require-pq" && eqv === null) opts.requirePq = true; else if (tok === "--require-anchor" && eqv === null) opts.requireAnchor = true;
+    else if (tok === "--trust-set-complete" && eqv === null) opts.trustSetComplete = true;   // 1.6.0 — SPEC §6.9
     else if (tok.startsWith("-") || path !== null) usage(); else path = tok; }
   if (!path) usage();
   const r = verifyEvidence(path, opts); emit(JSON.stringify(r, null, 1), r.valid ? 0 : 1);

@@ -63,6 +63,32 @@ class TestClosedSchemaMutants(unittest.TestCase):
         self.assertGreater(unmet, 0, "the sabotaged reference passed the bench: the bench cannot fail")
         self.assertGreater(silent, 0, "the sabotaged reference showed no silent acceptance: the silence counter cannot fail")
 
+    def test_bench_turns_red_on_a_reference_without_the_160_refusal(self):
+        """1.6.0 positive control: a copy of the reference WITHOUT the unknown-key refusal of artifacts[i] and signatures[i]
+        (the 1.5.x behaviour: artifact error / FAIL entry) must leave mutations without their class."""
+        import subprocess
+        d = tempfile.mkdtemp(prefix="ap2-mutants-control160-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        shutil.copytree(_HERE, os.path.join(d, "ref"), ignore=shutil.ignore_patterns(".git", "__pycache__", "dist", "*.egg-info"))
+        src = os.path.join(d, "ref", "ap2_evidence.py")
+        with open(src, encoding="utf-8") as f:
+            s = f.read()
+        anchors = ['            _check_unknown(a, f"artifacts[{i}]", _ARTIFACT_KEYS)\n',
+                   '            _check_unknown(e, f"producer_signatures.signatures[{i}]", _sigsuite.ENTRY_KEYS)\n']
+        for anchor in anchors:
+            self.assertIn(anchor, s)
+            s = s.replace(anchor, anchor.replace("_check_unknown(", "(lambda *_: None)("))
+        with open(src, "w", encoding="utf-8") as f:
+            f.write(s)
+        code = ("import sys; sys.path.insert(0, %r); import schema_mutants as M; r = M.run(quick=True, py_root=%r, js=None); "
+                "print(len(r['unmet']['py']), sum(1 for u in r['unmet']['py'] if '/artifacts[' in str(u) or '/signatures[' in str(u)))") % (
+                    os.path.join(_HERE, "verifiers"), os.path.join(d, "ref"))
+        out = subprocess.run([sys.executable, "-B", "-c", code], capture_output=True, text=True, timeout=600)
+        self.assertEqual(out.returncode, 0, out.stderr[-800:])
+        unmet, in_scope = map(int, out.stdout.split()[-2:])
+        self.assertGreater(unmet, 0, "the 1.5.x behaviour passed the 1.6.0 bench: the bench cannot fail")
+        self.assertEqual(unmet, in_scope, "only the artifact and signature-entry mutations may turn red")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

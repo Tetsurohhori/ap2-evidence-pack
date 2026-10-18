@@ -1,0 +1,62 @@
+{
+ "description": "The same pack under --trust-anchor issuer_other_ca.crt, a root that did not issue it: the chain does not reach the relying party's anchor — issuer_identity not_evaluated/chain_unresolved (krausz §5.4.2: not resolved in the relying party's material is not a defect of the input). Needs openssl.",
+ "normative": {
+  "anchors_verified": 0,
+  "bindings_ok": true,
+  "digest_ok": true,
+  "policy_ok": true,
+  "pq_protected": false,
+  "producer_ok": null,
+  "producer_present": false,
+  "producer_trusted": null,
+  "rfc3161_claimed": false,
+  "rfc3161_verified": null,
+  "self_asserted_only": true,
+  "valid": true
+ },
+ "policy": {
+  "trust_anchor": "issuer_other_ca.crt"
+ },
+ "requires": [
+  "openssl"
+ ],
+ "states": {
+  "admission": "admitted",
+  "policy": {
+   "met": true,
+   "unmet": []
+  },
+  "refusal_class": null,
+  "subjects": {
+   "holder_binding": {
+    "reasons": [
+     "not_present"
+    ],
+    "state": "not_evaluated"
+   },
+   "issuer_identity": {
+    "reasons": [
+     "chain_unresolved"
+    ],
+    "state": "not_evaluated"
+   },
+   "producer_signature": {
+    "reasons": [
+     "not_present"
+    ],
+    "state": "not_evaluated"
+   },
+   "sealed_content": {
+    "reasons": [],
+    "state": "verified"
+   },
+   "time_anchor": {
+    "reasons": [
+     "not_present"
+    ],
+    "state": "not_evaluated"
+   }
+  }
+ },
+ "vector": "issuer_x5c_chain_unresolved"
+}

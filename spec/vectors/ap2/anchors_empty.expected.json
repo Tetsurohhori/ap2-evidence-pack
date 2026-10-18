@@ -18,5 +18,11 @@
  "report": {
   "refused": "top level: anchors must be a non-empty list (SPEC §9.1)"
  },
+ "states": {
+  "admission": "refused",
+  "policy": null,
+  "refusal_class": "malformed",
+  "subjects": null
+ },
  "vector": "anchors_empty"
 }

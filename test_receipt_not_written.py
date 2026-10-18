@@ -950,28 +950,63 @@ class TestOpensslTemporaryFiles(unittest.TestCase):
         p = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, preexec_fn=pre, timeout=300)
         return p.returncode, p.stdout, p.stderr
 
-    def _check(self, cmd, field):
+    def _full_receipt_74(self, rc, out, err, subject, err_line):
+        """1.6.0 — SPEC §6.10: a check that could not be RUN here is exit 74 WITH the complete receipt: that subject
+        not_evaluated/instrument_failure, every other subject evaluated (1.5.2–1.5.4: exit 74 and no receipt at all)."""
+        self.assertEqual((rc, err), (74, err_line))
+        r = json.loads(out.decode("utf-8"))   # complete JSON: the reader's rule (SPEC §10) — a receipt = the instrument
+        self.assertEqual(r["admission"], "admitted")
+        self.assertEqual(r["states"][subject]["state"], "not_evaluated")
+        self.assertTrue(r["states"][subject]["reasons"])
+        self.assertEqual(r["states"][subject]["reasons"], ["instrument_failure"] * len(r["states"][subject]["reasons"]))
+        self.assertIn("check not run here", r["states"][subject]["detail"])
+        self.assertEqual(r["states"]["sealed_content"]["state"], "verified")   # the other subjects are still evaluated
+        return r
+
+    def _check(self, cmd, field, subject):
         rc, out, err = self._run(cmd, None)   # the control: the check runs and passes
         self.assertEqual((rc, err), (0, b""))
         self.assertIn(field, out)
+        self.assertEqual(json.loads(out)["states"][subject]["state"], "verified")
         # 0: no temporary directory passes tempfile's probe; 100: the probe passes, the file openssl reads does not fit
         for limit, why in ((0, b"no usable temporary directory"), (100, b"OSError: File too large")):
-            rc, out, err = self._run(cmd, limit)
-            self.assertEqual((rc, out), (74, b""), err)
-            self.assertEqual(err, b"receipt not written: cannot write a temporary file for openssl: " + why + b"\n")
+            rc, out, err = self._run(cmd, limit)   # stdout is a pipe: RLIMIT_FSIZE does not bind it, the receipt is written
+            self._full_receipt_74(rc, out, err, subject, b"check not run here: cannot write a temporary file for openssl: " + why + b"\n")
 
     def test_verify_tsa_cert(self):
         self._check(_PY + ["verify", os.path.join(_VEC, "anchor_valid.json"), "--tsa-cert",
-                           os.path.join(_VEC, "anchor_probe_tsa.crt"), "--require-anchor"], b'"tsa_verified": true')
+                           os.path.join(_VEC, "anchor_probe_tsa.crt"), "--require-anchor"], b'"tsa_verified": true', "time_anchor")
 
     def test_verify_trust_anchor(self):
-        self._check(_PY + ["verify", self.x5c, "--trust-anchor", self.ca], b'"chain_verified": true')
+        self._check(_PY + ["verify", self.x5c, "--trust-anchor", self.ca], b'"chain_verified": true', "issuer_identity")
+
+    def test_check_not_run_and_receipt_not_written_are_two_branches(self):
+        """1.6.0 — SPEC §6.10/§10: the two 74s are told apart by the receipt. A check not run here: the complete JSON on
+        stdout. The receipt itself not written (stdout a regular file under RLIMIT_FSIZE 0, or /dev/full): no complete
+        JSON, and "receipt not written" on stderr."""
+        cmd = _PY + ["verify", os.path.join(_VEC, "anchor_valid.json"), "--tsa-cert", os.path.join(_VEC, "anchor_probe_tsa.crt")]
+        import resource
+        out_path = os.path.join(self.d, "receipt.json")
+        with open(out_path, "wb") as fo:
+            p = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=fo, stderr=subprocess.PIPE, timeout=300,
+                               preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0)))
+        with open(out_path, "rb") as f:
+            written = f.read()
+        self.assertEqual(p.returncode, 74, p.stderr)
+        self.assertTrue(p.stderr.startswith(b"receipt not written: "), p.stderr)
+        with self.assertRaises(ValueError):
+            json.loads(written.decode("utf-8", "replace"))   # nothing (or a cut) — never a complete receipt
+        with open("/dev/full", "wb") as fo:   # the control: no openssl failure, only the write — the same branch
+            p = subprocess.run(_PY + ["verify", os.path.join(_VEC, "anchor_valid.json")], stdin=subprocess.DEVNULL, stdout=fo,
+                               stderr=subprocess.PIPE, timeout=300)
+        self.assertEqual(p.returncode, 74, p.stderr)
+        self.assertTrue(p.stderr.startswith(b"receipt not written: "), p.stderr)
 
     def test_library_raises_the_write_error(self):   # never a check reported as failed
         code = ("import resource, sys; sys.path.insert(0, sys.argv[1]); import ap2_evidence as a; "
                 "resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))\n"
                 "try:\n a.verify_evidence(sys.argv[2], trust_anchor=sys.argv[3])\n"
-                "except a.Ap2WriteError as e:\n print(str(e)); sys.exit(3)\n")
+                "except a.Ap2WriteError as e:\n print(str(e)); sys.exit(3 if e.receipt['states']['issuer_identity']['reasons'] == ['instrument_failure'] else 4)\n")
         p = subprocess.run([sys.executable, "-c", code, _HERE, self.x5c, self.ca], capture_output=True, timeout=300)
         self.assertEqual(p.returncode, 3, p.stderr)
         self.assertTrue(p.stdout.startswith(b"cannot write a temporary file for openssl"), p.stdout)
@@ -989,16 +1024,18 @@ class TestOpensslTemporaryFiles(unittest.TestCase):
         """openssl that cannot be started (fork refused: RLIMIT_NPROC 1) was a failed check: measured on 732705d and
         cb36d56, `--tsa-cert --require-anchor` on a valid pack gave `tsa_verified: false`, `valid: false`, exit 1, and
         `--trust-anchor` gave `chain_verified: false`. Now the check could not be run here: exit 74, one line."""
-        line = b"receipt not written: cannot run openssl here: BlockingIOError: Resource temporarily unavailable\n"
-        for cmd in (_PY + ["verify", os.path.join(_VEC, "anchor_valid.json"), "--tsa-cert",
-                           os.path.join(_VEC, "anchor_probe_tsa.crt"), "--require-anchor"],
-                    _PY + ["verify", os.path.join(_VEC, "anchor_valid.json"), "--tsa-cert", os.path.join(_VEC, "anchor_probe_tsa.crt")],
-                    _PY + ["verify", self.x5c, "--trust-anchor", self.ca]):
+        line = b"check not run here: cannot run openssl here: BlockingIOError: Resource temporarily unavailable\n"
+        for cmd, subject in ((_PY + ["verify", os.path.join(_VEC, "anchor_valid.json"), "--tsa-cert",
+                                     os.path.join(_VEC, "anchor_probe_tsa.crt"), "--require-anchor"], "time_anchor"),
+                             (_PY + ["verify", os.path.join(_VEC, "anchor_valid.json"), "--tsa-cert", os.path.join(_VEC, "anchor_probe_tsa.crt")], "time_anchor"),
+                             (_PY + ["verify", self.x5c, "--trust-anchor", self.ca], "issuer_identity")):
             with self.subTest(cmd=cmd[3:]):
                 rc, out, err = self._run(cmd, None)   # the control: the check runs and passes
                 self.assertEqual((rc, err), (0, b""))
-                rc, out, err = self._nproc(cmd)
-                self.assertEqual((rc, out, err), (74, b"", line))
+                rc, out, err = self._nproc(cmd)   # 1.6.0: 74 WITH the complete receipt (SPEC §6.10)
+                r = self._full_receipt_74(rc, out, err, subject, line)
+                if "--require-anchor" in cmd:   # the anchor was not counted: the policy is not met, and says why
+                    self.assertEqual((r["valid"], r["policy"]["unmet"]), (False, ["require_anchor"]))
         rc, out, err = self._nproc(_PY + ["verify", os.path.join(_VEC, "anchor_valid.json")])   # no openssl asked for:
         self.assertEqual((rc, err), (0, b""))                                                  # the limit changes nothing
 

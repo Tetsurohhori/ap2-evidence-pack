@@ -18,5 +18,11 @@
  "report": {
   "refused": "anchors[0]: unknown key \"x_unknown_2026\" (SPEC §9.1)"
  },
+ "states": {
+  "admission": "refused",
+  "policy": null,
+  "refusal_class": "unknown_member",
+  "subjects": null
+ },
  "vector": "anchors_unknown_key"
 }

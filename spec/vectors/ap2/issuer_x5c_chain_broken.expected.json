@@ -1,0 +1,62 @@
+{
+ "description": "An x5c chain whose intermediate certificate carries an altered signature, under --trust-anchor issuer_ca.crt: openssl reports a certificate signature failure — issuer_identity contradicted/chain_broken. The pack stays valid: a chain never decided `valid` (SPEC §6 step 7, unchanged), so this is the one contradicted subject outside the `valid` equation (SPEC §6.9). Needs openssl.",
+ "normative": {
+  "anchors_verified": 0,
+  "bindings_ok": true,
+  "digest_ok": true,
+  "policy_ok": true,
+  "pq_protected": false,
+  "producer_ok": null,
+  "producer_present": false,
+  "producer_trusted": null,
+  "rfc3161_claimed": false,
+  "rfc3161_verified": null,
+  "self_asserted_only": true,
+  "valid": true
+ },
+ "policy": {
+  "trust_anchor": "issuer_ca.crt"
+ },
+ "requires": [
+  "openssl"
+ ],
+ "states": {
+  "admission": "admitted",
+  "policy": {
+   "met": true,
+   "unmet": []
+  },
+  "refusal_class": null,
+  "subjects": {
+   "holder_binding": {
+    "reasons": [
+     "not_present"
+    ],
+    "state": "not_evaluated"
+   },
+   "issuer_identity": {
+    "reasons": [
+     "chain_broken"
+    ],
+    "state": "contradicted"
+   },
+   "producer_signature": {
+    "reasons": [
+     "not_present"
+    ],
+    "state": "not_evaluated"
+   },
+   "sealed_content": {
+    "reasons": [],
+    "state": "verified"
+   },
+   "time_anchor": {
+    "reasons": [
+     "not_present"
+    ],
+    "state": "not_evaluated"
+   }
+  }
+ },
+ "vector": "issuer_x5c_chain_broken"
+}

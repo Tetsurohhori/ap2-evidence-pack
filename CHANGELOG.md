@@ -1,5 +1,77 @@
 # Changelog
 
+## 1.6.0 — 2026-10-18 — one closed field per question: admission, states, policy
+
+A relying party (a dispute provider, an auditor) used to read the verdict off twelve booleans and their combinations, and
+several combinations meant two things: a refusal had `digest_ok: false` like a tampered pack; a producer signature that
+could not be checked (`SKIP`) looked like one that failed; `null` meant "nothing claimed" in one field and "not checked
+here" in another; exit 74 meant both "a check could not run here" and "the receipt was not written". 1.6.0 adds, in both
+verifiers, one closed field per question (SPEC §6.9), defined in this SPEC with the immutable identifier
+`ap2-evidence-pack/states-1` and aligned with draft-krausz-verification-state-03 §3.1, §3.3, §5.4.2 (work in progress).
+The twelve fields of §6 keep their meaning.
+
+**Not additive** (a verifier, a reader or a runner of 1.5.x sees these differences):
+
+1. **An unknown key inside `artifacts[i]`, its `key`, `kb_jwt` or `verified_at_build`, or inside a
+   `producer_signatures.signatures[i]` entry is a refusal** (`refusal_class: unknown_member`, SPEC §9.1), as in every other
+   object of §9.1. 1.4.0–1.5.4 made it an artifact error or a FAIL entry, which the twelve fields showed as an altered
+   artifact or a failed signature. The twelve fields of two vectors change (measured on the reference, 2026-10-18):
+   `unknown_key_artifact` — `digest_ok` and `policy_ok` true → false; `unknown_key_producer_entry` — `digest_ok`,
+   `bindings_ok`, `policy_ok` true → false, `producer_present` true → false, `producer_ok` false → null. (The design of
+   this release listed the other changes but not `policy_ok`: a refusal receipt has `policy_ok: false`.) `valid` and the
+   exit code (1) change on no pack: such a pack was never valid. A 29/29 conformance to 1.5.x is not conformance to 1.6.0.
+   Only the unknown-key rule moves; a wrong type or a missing key stays an artifact error / FAIL entry, and the objects
+   of §9.2 keep their standard's rule (`header_param_ignored`, `key_jwk_member_ignored` stay valid; an unknown `crit`
+   stays the artifact's error).
+2. **Exit 74 for a check that could not be run here comes with the complete receipt** (SPEC §6.10): openssl that cannot be
+   started or does not answer, or temporary files openssl needs that cannot be written, under `--tsa-cert` or
+   `--trust-anchor`. 1.5.2–1.5.4 wrote no receipt; now stdout holds the receipt (that subject
+   `not_evaluated/instrument_failure`, the others evaluated) and stderr one line `check not run here: …`. A receipt that
+   cannot be written stays 74 with `receipt not written: …` and no complete JSON: the reader tells the two apart by the
+   receipt. The library still raises `Ap2WriteError`, now carrying the receipt in `.receipt`. openssl ABSENT is unchanged
+   (exit by `valid`, the field `null`; the subject says `instrument_failure`).
+3. **The JS verifier refuses `--trust-anchor`** (exit 2, usage): it cannot validate x5c chains, and 1.1.0–1.5.4 accepted the
+   flag and did nothing with it (`chain_verified: null`). Under `--tsa-cert` it states `time_anchor`
+   `not_evaluated/instrument_failure` (it counted no anchor before too: fail-closed, now named).
+4. **The expected files** carry a required `states` block and may carry the policy keys `trust_set_complete`, `tsa_cert`,
+   `trust_anchor` (SPEC §7); a 1.5.x runner stops on them (closed format, exit 2). `requires_backend` is on 21 vectors (12
+   in 1.5.4): `digest_mismatch` and the three `producer_*_fails_*` vectors, whose `states` block depends on the ML-DSA-65
+   backend, and five of the new vectors — measured with `make_vectors_154.py --declare-backend`.
+
+**Added:**
+
+- `admission` (`admitted` / `refused`) with `refusal_class` (`format_unsupported`, `unknown_member`, `malformed`);
+  `states_vocabulary`; `states` — five subjects (`sealed_content`, `holder_binding`, `time_anchor`, `producer_signature`,
+  `issuer_identity`), each `{state, reasons, detail?}` with the precedence contradicted > not_evaluated/instrument_failure
+  > other not_evaluated > verified; `policy` — `{met, unmet}`. A refused pack has `states` and `policy` `null`.
+- `producer_signatures.ok` is always present (`null` without a producer block, and on every refusal): the 1.5.4 reference
+  wrote no such key on 12 of the 29 vectors (measured 2026-10-18, no policy flags).
+- `--trust-set-complete` / `trust_set_complete=True` (both verifiers): the pinned set is declared complete; a
+  `key_unresolved` producer key then also puts `trust_set_complete` in `policy.unmet`. Never a failed signature; `valid`
+  unchanged.
+- 13 vectors, one per cell of the §6.9 table the others did not reach (`make_vectors_160.py`, whose `states` blocks are
+  written by hand from the table and checked against the reference with `--check`: 0 differences), and the `states`
+  block of the 29 earlier vectors (`--states`, from the reference, reviewed one by one in the release report).
+- `verifiers/states_controls.py` and `test_ap2_states.py`: the pre-registered controls of the design, generative over the
+  schema-mutant corpus under four pinned-set inputs — no `contradicted` without a check that ran and failed, no `verified`
+  over a check that did not run, the `valid` equation of §6.9, pinned sets that never create or remove a contradiction —
+  22 967 receipts, 0 violations; each of six deliberately broken rules turns it red. On the same 22 967 inputs `valid`
+  equals the 1.5.4 verifier's on every one (`--old`; `trust_set_complete` is not passed to 1.5.4, and no input of the
+  bench sets it).
+- SPEC §10 (informative): reading a receipt as a relying party, with the mapping of the 1.6.0 fields to ACP SEP #303
+  §7.4a at commit 6710a3a and an informative mapping to draft-xg-payment-dispute-profile-01.
+
+**Found by the bench before release:** the first draft of the derivation stated `sealed_content: verified` on packs whose
+KB-JWT failed, where §6 step 3 sets `bindings_ok: false` without recomputing the binding set — `verified` over a check that
+had not run (89 receipts). The binding set is now recomputed for the state whenever every artifact's signature and claims
+verified. The pre-registered equation for `valid` (every subject, no `SKIP` term) does not hold on two vectors and is
+corrected in SPEC §6.9: `issuer_x5c_chain_broken` (a chain never decided `valid`) and `producer_backend_missing` (a `SKIP`
+entry makes the block not `ok` with no check failed).
+
+Measured on 2026-10-18 (Python 3.11.2, cryptography 50.0.1, OpenSSL 3.0.22, Node 22.23.2): conformance 42/42 (reference),
+37/42 + 5 SKIP (JS: the vectors that need openssl); differential oracle 185 cases, 0 disagreements, 12 declared; schema
+mutants (full) 23 486 mutations, 0 unmet, 0 disagreements on 23 545 files.
+
 ## 1.5.4 — 2026-10-18 — a producer block that does not verify states no trust and no post-quantum protection
 
 Points 2–5 below come from an independent clean-room verifier by @Tetsurohhori (aos-standard/catalog 556b982), written

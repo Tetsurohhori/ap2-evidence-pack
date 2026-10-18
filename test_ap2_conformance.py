@@ -28,7 +28,7 @@ class TestAp2ConformanceVectors(unittest.TestCase):
         r = rc.run()
         self.assertTrue(r["conformant"], r)
         statuses = {x["vector"]: x["status"] for x in r["results"]}
-        self.assertEqual(len(statuses), 29, statuses)   # 1.1.0: + anchor_valid (real token, probe TSA) and anchor_wrong_digest; 1.4.0: + 9 closed-schema vectors (SPEC §9); 1.5.0: + 9 anchors vectors (SPEC §3.3); 1.5.4: + 3 producer-block vectors (SPEC §5)
+        self.assertEqual(len(statuses), 42, statuses)   # 1.1.0: + anchor_valid (real token, probe TSA) and anchor_wrong_digest; 1.4.0: + 9 closed-schema vectors (SPEC §9); 1.5.0: + 9 anchors vectors (SPEC §3.3); 1.5.4: + 3 producer-block vectors (SPEC §5); 1.6.0: + 13 states vectors (SPEC §6.9)
         self.assertEqual(statuses.get("kb_jwt_valid"), "PASS", statuses)   # 1.4.0: the KB-JWT positive control
         # the set must contain the positive control — an always-reject verifier must fail
         self.assertEqual(statuses.get("valid_signed"), "PASS", statuses)
@@ -350,8 +350,9 @@ class TestAp2ConformanceVectors(unittest.TestCase):
         probe = subprocess.run(["node", "-e", "const{createPublicKey}=require('node:crypto');try{createPublicKey({key:Buffer.concat([Buffer.from('308207b2300b0609608648016503040312038207a100','hex'),Buffer.alloc(1952)]),format:'der',type:'spki'});console.log('yes')}catch{console.log('no')}"], capture_output=True, text=True)
         if probe.stdout.strip() != "yes":   # r2: on a Node build without ML-DSA-65 (OpenSSL < 3.5) the ML-DSA vectors are SKIP in the JS verifier, so 8/8 is NOT measured — skip, never a pass
             self.skipTest("Node build without ML-DSA-65 (OpenSSL < 3.5): JS conformance on the ML-DSA vectors not measured here")
-        def js_verify(path, trusted_producer_keys=None, require_pq=False, require_producer=False, require_anchor=False, min_anchors=None):   # no **_: an option nobody passes on is an error, not silence (1.5.0)
-            flags = []
+        def js_verify(path, trusted_producer_keys=None, require_pq=False, require_producer=False, require_anchor=False, min_anchors=None,
+                      trust_set_complete=False):   # no **_: an option nobody passes on is an error, not silence (1.5.0)
+            flags = ["--trust-set-complete"] if trust_set_complete else []
             for alg, keys in (trusted_producer_keys or {}).items():
                 for k in ([keys] if isinstance(keys, str) else keys): flags += ["--trusted-producer-key", f"{alg}={k}"]
             for flag, on in (("--require-producer", require_producer), ("--require-pq", require_pq), ("--require-anchor", require_anchor)):
@@ -360,10 +361,13 @@ class TestAp2ConformanceVectors(unittest.TestCase):
                 flags += ["--min-anchors", str(min_anchors)]
             out = subprocess.run(["node", os.path.join(_HERE, "verifiers", "js", "ap2-verify.mjs"), path] + flags, capture_output=True, text=True)
             return json.loads(out.stdout)
-        r = rc.run(verify_fn=js_verify, backends={"ml-dsa-65": True})   # the probe above: this Node checks ML-DSA-65
+        r = rc.run(verify_fn=js_verify, backends={"ml-dsa-65": True}, tools={"openssl": False})   # the probe above: this Node checks ML-DSA-65; it calls no openssl
         self.assertTrue(r["conformant"], r)
-        self.assertEqual(len(r["results"]), 29)   # 1.5.0: + 9 anchors vectors; 1.5.4: + 3 producer-block vectors
-        self.assertEqual([x for x in r["results"] if x["status"] != "PASS"], [])   # nothing SKIP: every vector measured
+        self.assertEqual(len(r["results"]), 42)   # 1.5.0: + 9 anchors vectors; 1.5.4: + 3 producer-block vectors; 1.6.0: + 13 states vectors
+        needs_openssl = sorted(n[:-len(".expected.json")] for n in os.listdir(os.path.join(_HERE, "spec", "vectors", "ap2")) if n.endswith(".expected.json")
+                               and "openssl" in json.load(open(os.path.join(_HERE, "spec", "vectors", "ap2", n), encoding="utf-8")).get("requires", []))
+        self.assertEqual(sorted(x["vector"] for x in r["results"] if x["status"] == "SKIP"), needs_openssl)   # SKIP = exactly the openssl vectors (1.6.0)
+        self.assertEqual([x for x in r["results"] if x["status"] not in ("PASS", "SKIP")], [])
 
 
 
@@ -387,7 +391,7 @@ class TestExpectedFilesAndBackend(unittest.TestCase):
         declared = sorted(json.load(open(p, encoding="utf-8"))["vector"] for p in glob.glob(os.path.join(self.VDIR, "*.expected.json"))
                           if "requires_backend" in json.load(open(p, encoding="utf-8")))
         self.assertEqual(declared, mv.measured_backend_dependence())
-        self.assertEqual(len(declared), 12, declared)
+        self.assertEqual(len(declared), 21, declared)   # 1.6.0: 21 (the states block also depends on the backend)
         self.assertTrue(ap2._sigsuite.MLDSA_AVAILABLE)   # the measurement restored the backend
 
     def test_without_the_backend_the_marked_vectors_are_skip_and_the_rest_pass(self):
@@ -398,8 +402,8 @@ class TestExpectedFilesAndBackend(unittest.TestCase):
             r = rc.run()
             st = {x["vector"]: x["status"] for x in r["results"]}
             self.assertTrue(r["conformant"], r)
-            self.assertEqual(sum(v == "SKIP" for v in st.values()), 12, st)
-            self.assertEqual(sum(v == "PASS" for v in st.values()), 17, st)
+            self.assertEqual(sum(v == "SKIP" for v in st.values()), 21, st)
+            self.assertEqual(sum(v == "PASS" for v in st.values()), 21, st)
             # the bench can fail: the same run with one marker removed reports that vector FAIL, not SKIP
             d = self._copy(); p = os.path.join(d, "valid_signed.expected.json")
             e = json.load(open(p, encoding="utf-8")); del e["requires_backend"]; json.dump(e, open(p, "w", encoding="utf-8"))
@@ -536,12 +540,12 @@ class TestSignatureEntryNamesTheKey(unittest.TestCase):
                                            capture_output=True, text=True).stdout)
         finally:
             shutil.rmtree(d)
-        want = ('entry is not the closed shape of SPEC §9.1; unknown key(s) ["1","zz","zz_extra","\uFFFDk","\U0001F600k"]'
-                '; missing ["signature_b64"]')
+        # 1.6.0 — SPEC §9.1/§6.9 (not additive): an unknown key in an entry is a refusal of class unknown_member naming the
+        # first unknown key by code point (1.4.1–1.5.4: a FAIL entry whose note named them all)
+        want = 'producer_signatures.signatures[0]: unknown key "1" (SPEC §9.1)'
         for r in (py, js):
             self.assertFalse(r["valid"])
-            self.assertEqual(r["producer_signatures"]["signatures"][0]["status"], "FAIL")
-            self.assertEqual(r["producer_signatures"]["signatures"][0]["note"], want)
+            self.assertEqual((r["admission"], r["refusal_class"], r["refused"], r["states"]), ("refused", "unknown_member", want, None))
 
     def _both(self, ev):
         import subprocess
@@ -603,11 +607,14 @@ class TestSignatureEntryNamesTheKey(unittest.TestCase):
     def test_fail_entry_without_string_sig_alg_names_the_keys(self):
         """1.4.1: an entry whose sig_alg is absent or not a string is a FAIL entry that names its unknown and missing keys
         too (in 1.4.0 it carried no note at all, in both verifiers)."""
+        for mutate in (lambda e: (e.pop("sig_alg"), e.update({"x_unknown": 1})), lambda e: e.update({"sig_alg": 5, "x_unknown": 1})):
+            ev = self._anchor_valid()   # 1.6.0: with an unknown key the entry is a refusal (unknown_member), whatever else it lacks
+            mutate(ev["producer_signatures"]["signatures"][0])
+            for r in self._both(ev):
+                self.assertEqual((r["refusal_class"], r["refused"]), ("unknown_member", 'producer_signatures.signatures[0]: unknown key "x_unknown" (SPEC §9.1)'))
         for mutate, want in (
-                (lambda e: (e.pop("sig_alg"), e.update({"x_unknown": 1})),
-                 'entry is not the closed shape of SPEC §9.1; unknown key(s) ["x_unknown"]; missing ["sig_alg"]'),
-                (lambda e: e.update({"sig_alg": 5, "x_unknown": 1}),
-                 'entry is not the closed shape of SPEC §9.1; unknown key(s) ["x_unknown"]')):
+                (lambda e: e.pop("sig_alg"), 'entry is not the closed shape of SPEC §9.1; missing ["sig_alg"]'),
+                (lambda e: e.update({"sig_alg": 5}), 'entry is not the closed shape of SPEC §9.1')):
             ev = self._anchor_valid()
             mutate(ev["producer_signatures"]["signatures"][0])
             py, js = self._both(ev)
