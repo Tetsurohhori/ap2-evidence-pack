@@ -388,6 +388,8 @@ injection. `_sd: null` is refused by BOTH.
 
 Independent implementations (any language): open a PR to be listed here.
 
+- [`aos-standard/catalog` `docs/runs/ap2-evidence-pack-cold/`](https://github.com/aos-standard/catalog/tree/main/docs/runs/ap2-evidence-pack-cold) — Python, written from `SPEC_AP2_EVIDENCE.md` only (reference and JS verifiers not opened); `cryptography` for ES256/Ed25519/P-256, the `openssl` 3.6 binary for ML-DSA-65. Verifier `ap2_cold_verifier.py` sha256 `638bb3b7…a9beb5`, run at catalog `556b982` against vectors `f03abbc` (1.5.3): 26/26 (first scored run 25/26, one check reordered); unchanged, against `c08128e` (1.5.4): 29/29, 0 SKIP (`ADDENDUM-c08128e.md`, catalog `1ddaa1c`). Does not read `requires_backend`: on a host without ML-DSA-65 it reports the twelve marked vectors as disagreements, not SKIP.
+
 ## Tests
 
 ```bash
