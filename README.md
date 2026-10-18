@@ -215,7 +215,7 @@ policy_ok, producer_present, producer_trusted, rfc3161_claimed/granted/imprint_o
 self_asserted_only, provenance_classes, and the `x5c_leaf` identity of every artifact)`
 — the normative fields of SPEC §6 (twelve since 1.5.0: `anchors_verified`) plus `rfc3161.granted`, `rfc3161.imprint_ok`, `rfc3161.gen_time`,
 `chain_verified`, `provenance_classes`, the `x5c_leaf` identity and, since 1.5.0, each `anchors` entry and the refusal
-text where SPEC §9.1/§3.3 fix it — on the 29 vectors under their declared policy (plus `anchor_valid` under
+text where SPEC §9.1/§3.3 fix it — on the vectors under their declared policy (29 up to 1.5.4, 42 since 1.6.0; plus `anchor_valid` under
 `--require-anchor --tsa-cert`, `anchors_two_valid` under `--min-anchors 2` with a bundle of both probe TSAs and with
 the first TSA alone, and the CA-issued `x5c` leaf under `--trust-anchor`), 117 hostile files that carry the digest a lenient verifier would
 recompute or a wrong JSON shape (`__proto__` key with the digest recomputed over it, non-UTF-8, float `1.0`, 2^53+1, 100000-deep,
@@ -276,7 +276,8 @@ review rounds; this very sentence had gone stale once more, and was caught by th
 reference proves the TSA with openssl and the JS verifier reports `tsa_verified: null` and does
 not pass the policy; and the three packs under `--trust-anchor` — the CA-issued leaf, the self-signed leaf and the mixed
 mandate-plus-chained pack — whose chains the reference validates with `openssl verify` (clearing `self_asserted_only` for
-the CA-issued one) while the JS verifier cannot and reports `chain_verified: null`. A crash counts as a disagreement, and a declared divergence that stops
+the CA-issued one) while the JS verifier cannot: it reported `chain_verified: null` up to 1.5.4 and since 1.6.0 refuses
+`--trust-anchor` as a usage error, which is what the oracle now declares. A crash counts as a disagreement, and a declared divergence that stops
 appearing is reported. Positive controls (`AP2_ORACLE_PY_ROOT` / `AP2_ORACLE_JS` point the oracle
 at another checkout), measured 22/09/2026 with the 124-case oracle: against the 1.0.2 reference it is red on 97
 (the CLI had no policy flags; float / 2^53+1 / lone surrogate / a space inside a producer
