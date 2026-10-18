@@ -6,7 +6,7 @@
 // Acceptance profile of the file (SPEC §3.1): strict UTF-8, no BOM, no duplicate keys, no floats, integers within
 // +/-(2^53-1), nesting <= 512, no lone surrogate escape, 64 MiB bound. A refused file is a receipt with valid=false.
 // Usage: ap2-verify.mjs <evidence.json> [--trusted-producer-key ALG=B64]... [--require-producer] [--require-pq] [--require-anchor] [--min-anchors N] [--tsa-cert PEM] [--trust-set-complete]
-import { statSync, openSync, fstatSync, readSync, closeSync, writeSync, constants as FS } from "node:fs";
+import { statSync, accessSync, openSync, fstatSync, readSync, closeSync, writeSync, constants as FS } from "node:fs";
 import { createHash, createPublicKey, verify as cryptoVerify, X509Certificate } from "node:crypto";
 
 const MAX_DEPTH = 512, MAX_BYTES = 64 * 1024 * 1024, SAFE = 2 ** 53 - 1;
@@ -510,6 +510,8 @@ function main(argv) {
     else if (tok === "--trust-set-complete" && eqv === null) opts.trustSetComplete = true;   // 1.6.0 — SPEC §6.9
     else if (tok.startsWith("-") || path !== null) usage(); else path = tok; }
   if (!path) usage();
+  // 1.6.0 review: a --tsa-cert that cannot be read is a usage error, as in the reference (it named no certificate)
+  if (opts.tsaCert !== undefined) { let ok = false; try { ok = statSync(opts.tsaCert).isFile(); accessSync(opts.tsaCert, FS.R_OK); } catch { ok = false; } if (!ok) usage(); }
   const r = verifyEvidence(path, opts); emit(JSON.stringify(r, null, 1), r.valid ? 0 : 1);
 }
 // exitCode, not process.exit(): exit() right after console.log to a PIPE drops every byte of the receipt past the pipe buffer (64 KiB on Linux)

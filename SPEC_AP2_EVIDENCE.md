@@ -300,7 +300,8 @@ flags: `require_producer`, `require_pq`, `require_anchor`, and `min_anchors` (1.
    element of its verified payload, and refuses `_sd: null` as this format does); the
    canonical form of the resolved claims MUST equal the recorded
    `resolved_claims`; re-verify the KB-JWT when the issuer payload carries
-   `cnf.jwk` (ES256 over `issuer-JWT~disclosure*~`; without `cnf.jwk` a present
+   `cnf.jwk` (its ES256 signature under `cnf.jwk`, AND its `sd_hash` equal to BASE64URL(SHA-256) of
+   `issuer-JWT~disclosure*~` — RFC 9901 §7.3 step 5.c and 5.g; a KB-JWT that fails either verifies FALSE; without `cnf.jwk` a present
    KB-JWT is recorded as unverifiable, never treated as verified-green, and
    never fails the pack by itself — but a KB-JWT that verifies FALSE does, and a §3.1 profile
    violation in any of its three segments is that artifact's failure whether or not the holder
@@ -370,7 +371,7 @@ receipt of both verifiers also carries:
 - `admission`: `"admitted"` or `"refused"`. Every refusal of this text (§1, §3.1, §3.3, §6 step 1, §9.1) is `"refused"`
   and carries `refusal_class`, one of:
   - `format_unsupported` — the pack names a revision or a mechanism this verifier does not implement: an
-    `evidence_format` other than `"ap2-evidence-pack/1.0"`, an `honest_scope` that is not the canonical scope of that
+    `evidence_format` other than `"ap2-evidence-pack/1.0"` (also absent or not a string), an `honest_scope` that is not the canonical scope of that
     format (the scope is fixed by the format version, §1), an `anchors` mechanism this revision does not define (§3.3);
   - `unknown_member` — a key outside the closed list of an object of §9.1;
   - `malformed` — every other refusal (the §3.1 profile, a missing or mistyped MUST, a name that is not a non-empty
@@ -398,7 +399,9 @@ receipt of both verifiers also carries:
 
 **Elements and precedence.** Each subject is stated from its ELEMENTS — one per thing it covers (an artifact, a token, a
 signature entry) — and takes the state of its highest element under: `contradicted` > `not_evaluated` with reason
-`instrument_failure` > any other `not_evaluated` > `verified` (cf. krausz §5.4.1(j): malformed outranks unknown). A subject
+`instrument_failure` > any other `not_evaluated` > `verified` (cf. krausz §5.4.1(j): malformed outranks unknown). The two `not_evaluated` ranks give the same
+state; an `instrument_failure` element is never hidden by the rank, because `reasons` lists every element that is not
+`verified`. A subject
 is `verified` only when every element is. `reasons` lists one reason per element that is not `verified`, in element order;
 on a `verified` subject it lists the qualifiers of its elements (in this revision only `ca_certified`). A subject with no
 element is `not_evaluated` with `not_present`.
@@ -406,16 +409,17 @@ element is `not_evaluated` with `not_present`.
 | subject | elements | `verified` | `contradicted` (reason) | `not_evaluated` (reason) |
 |---|---|---|---|---|
 | `sealed_content` | the digest (§3); each artifact (§6 step 2: issuer signature and claims); the binding set (§4), recomputed for this subject whenever every artifact's signature and claims verified — also when a KB-JWT failed, where `bindings_ok` is false by §6 step 3 | every element | `digest_mismatch`; `artifact_invalid` (an artifact error, a signature or claims that do not verify, or no artifact); `binding_mismatch` | — |
-| `holder_binding` | each artifact that is not an error and carries a KB-JWT | its KB-JWT verifies under `cnf.jwk` | `kb_signature_invalid`; `sd_hash_mismatch` | `holder_key_unknown` (no `cnf.jwk`: recorded, never fails the pack, §6 step 2); `not_present` |
-| `time_anchor` | the `rfc3161_timestamp` token when `anchored`; each `anchors` entry | binding verified (§3.2) AND, under `--tsa-cert`, the TSA signature verified | `token_invalid` (not a parseable, granted token); `binding_mismatch` (its imprint is another digest); `token_missing` (`anchored` with no `tsr_b64`, §6 step 4) | `tsa_not_checked` (binding verified, no TSA certificate given: a self-issued token satisfies the binding, §3.2); `tsa_invalid` (the TSA signature does not verify under the certificate given: not counted, §3.3); `instrument_failure`; `not_present` |
+| `holder_binding` | each artifact that is not an error and carries a KB-JWT | its KB-JWT verifies under `cnf.jwk` | `kb_signature_invalid` (the signature does not verify, whatever `sd_hash`); `sd_hash_mismatch` (the signature verifies, `sd_hash` does not) | `holder_key_unknown` (no `cnf.jwk`: recorded, never fails the pack, §6 step 2); `not_present` |
+| `time_anchor` | the `rfc3161_timestamp` token when `anchored`; each `anchors` entry | binding verified (§3.2) AND, under `--tsa-cert`, the TSA signature verified | `binding_mismatch` (an imprint was read and is another digest, whatever else fails); `token_invalid` (otherwise: not a parseable, granted token); `token_missing` (`anchored` with no `tsr_b64`, §6 step 4) | `tsa_not_checked` (binding verified, no TSA certificate given: a self-issued token satisfies the binding, §3.2); `tsa_invalid` (the TSA signature does not verify under the certificate given: not counted, §3.3); `instrument_failure`; `not_present` |
 | `producer_signature` | each signature entry; the block itself | `PASS` with a key in the pinned set | `signature_invalid` (a `FAIL` entry; also a block with no entry, or whose `scheme` does not match its entries, §5, with a `detail`) | `self_asserted` (`PASS`, no pinned set: the key is carried by the pack — `valid` can be true without pins, a policy of this format, never a trust statement; krausz §5.4.2(a) has no resolved result without the relying party's trust material); `key_unresolved` (`PASS`, a pinned set that does not hold the key — not a failed signature); `backend_missing` (`SKIP`: no ML-DSA-65 backend, or a `sig_alg` this format does not define); `not_present` |
-| `issuer_identity` | the key of each artifact that is not an error | an `x5c_header` key whose chain validates to the relying party's trust anchor (§6 step 7) — qualifier `ca_certified`: a CA under YOUR anchor certified the key, never "this is the issuer" | `chain_broken` (a certificate signature inside the chain does not verify) | `self_asserted` (`jwk_header`, `supplied`, `jwks_fetched`); `no_trust_anchor` (`x5c_header`, no anchor given); `chain_unresolved` (the chain does not reach the anchor given: not resolved in the relying party's material, not a defect of the input); `instrument_failure`; `not_present` |
+| `issuer_identity` | the key of each artifact that is not an error | an `x5c_header` key whose chain validates to the relying party's trust anchor (§6 step 7) — qualifier `ca_certified`: a CA under YOUR anchor certified the key, never "this is the issuer" | `chain_broken` (openssl reports a certificate signature failure inside the chain, or an `x5c` entry is not strict base64) | `self_asserted` (`jwk_header`, `supplied`, `jwks_fetched`); `no_trust_anchor` (`x5c_header`, no anchor given); `chain_unresolved` (the chain does not reach the anchor given: not resolved in the relying party's material, not a defect of the input); `instrument_failure`; `not_present` |
 
 An artifact that is an error is stated once, in `sealed_content` (`artifact_invalid`); `holder_binding` and
 `issuer_identity` are stated over the artifacts that are not errors, and say `not_present` with a `detail` when none is.
 
 `instrument_failure` (krausz §3.1: the verifier's instrument failed; never a result about the input): openssl absent,
-openssl that cannot be started or does not answer, a temporary file openssl needs that cannot be written, a verifier that
+openssl that cannot be started, is killed by a signal or does not answer, a temporary file openssl needs that cannot be
+written, a verifier that
 cannot make the check at all (the JS verifier under `--tsa-cert`). The `detail` names which. No producer check calls an
 outside tool, so this revision never states it on `producer_signature`.
 
@@ -446,10 +450,12 @@ the same states (`producer_signature: not_evaluated`, `not_present`): only the S
 
 ### 6.10 Exit codes and the receipt (NORMATIVE, 1.6.0)
 
-`0`: `valid`. `1`: not `valid`, OR refused — read `admission`. `2`: a usage error (no receipt). `74`: one of two cases,
+`0`: `valid`. `1`: not `valid`, OR refused — read `admission`. `2`: a usage error (no receipt; 1.6.0: also a `--tsa-cert` or `--trust-anchor` that is not a readable regular
+file). `74`: one of two cases,
 told apart by what is on stdout:
 
-- a check the caller asked for could not be RUN on this machine (openssl that cannot be started or does not answer, a
+- a check the caller asked for could not be RUN on this machine (openssl that cannot be started, is killed by a signal or
+  does not answer, a
   temporary file openssl needs that cannot be written): the COMPLETE receipt on stdout — that subject `not_evaluated` with
   `instrument_failure` and a `detail` beginning `check not run here`, every other subject evaluated — and one line on
   stderr beginning `check not run here:`. 1.5.2–1.5.4 gave 74 with no receipt here. The library raises `Ap2WriteError`
@@ -577,8 +583,9 @@ of the top level, `rfc3161_timestamp`, `producer_signatures`, `bindings[i]` and 
 a wrong type or a missing key in these objects stays an artifact error or a FAIL entry (a FAIL entry's `note` names its
 missing keys). This changes the twelve fields of two vectors: `unknown_key_artifact` (`digest_ok` and `policy_ok`
 true → false) and `unknown_key_producer_entry` (`digest_ok`, `bindings_ok`, `policy_ok` true → false, `producer_present`
-true → false, `producer_ok` false → null). `valid` and the exit code (1) do not change on any pack: a pack with such a key
-was never valid. A verifier conformant to the 1.5.x vectors is therefore not conformant to 1.6.0 on these two. The rule
+true → false, `producer_ok` false → null). `valid` does not change on any pack: a pack with such a key was never valid. The exit code
+(1) changes in one branch: under `--tsa-cert` or `--trust-anchor` where openssl cannot run, 1.5.x reached that check
+first (exit 74, no receipt); 1.6.0 refuses before any check runs (exit 1). A verifier conformant to the 1.5.x vectors is therefore not conformant to 1.6.0 on these two. The rule
 applies to the objects of THIS section only: the objects of §9.2 keep their standard's rule (an unknown header parameter
 or JWK member is ignored and reported — `header_param_ignored`, `key_jwk_member_ignored` stay valid — and an unknown
 `crit` extension stays the artifact's error, RFC 7515 §4.1.11).
@@ -637,7 +644,8 @@ does not emit their names. Since 1.6.0 the receipt states its verdict in four fi
 1.6.0, `null` when there is no producer block) and `.trusted`, and `rfc3161_claimed` and `rfc3161_verified` are
 `rfc3161.claimed` and `.verified`. A reference to a pack by `evidence_digest_sha256` alone does not identify one file: the
 digest covers the sealed content (§3), not `rfc3161_timestamp`, `producer_signatures` or `anchors`, so a copy with a
-signature or an anchor removed, or re-signed, has the same digest (and the same `states`, §6.9). Record the SHA-256 of
+signature or an anchor removed, or re-signed, has the same digest (and a copy with its producer block removed has the
+states of a pack that never had one, §6.9). Record the SHA-256 of
 the whole file, or verify with pinned producer keys and `require_producer`, plus `require_anchor` or `min_anchors` when
 a ground rests on the pack's time.
 
@@ -680,8 +688,8 @@ a TSA's clock. A time-based ground needs `time_anchor: verified` under the certi
 read with its `gen_time`, or an independent timestamp.
 
 **ACP SEP #303 §7.4a.** The Agentic Commerce Protocol dispute RFC (agentic-commerce-protocol/agentic-commerce-protocol
-PR #316, `rfcs/rfc.dispute_resolution.md` at commit 6710a3a, 2026-10-17, a proposal under review) maps the twelve fields to
-admissibility. Its rows, and the 1.6.0 fields that carry the same condition:
+PR #316, `rfcs/rfc.dispute_resolution.md` at commit 6710a3a, 2026-10-17, a proposal under review) maps nine of the twelve fields (`bindings_ok`,
+`pq_protected` and `policy_ok` are not named in §7.4a) and the `anchors` binding to admissibility. Its rows, and the 1.6.0 fields that carry the same condition:
 
 | §7.4a at 6710a3a | 1.6.0 fields |
 |---|---|

@@ -1,6 +1,10 @@
 # gitleaks fingerprints (path-based, `gitleaks dir`). The two KB-JWT conformance vectors of 1.4.0 carry a complete
 # JWT (`eyJ….eyJ….sig`) in sd_jwt_compact: an ES256 signature over public claims under a holder key generated for the
-# vector and discarded. The token IS the test object; it holds no secret. Every other vector carries the same kind of
+# vector and discarded. The token IS the test object; it holds no secret. 1.6.0 adds the three holder_* vectors (same kind
+# of token, a holder key generated for the vector). Every other vector carries the same kind of
 # token without triggering the rule (the `~` after the issuer signature breaks the match).
 spec/vectors/ap2/kb_jwt_valid.json:jwt:43
 spec/vectors/ap2/kb_jwt_typ_missing.json:jwt:43
+spec/vectors/ap2/holder_kb_signature_invalid.json:jwt:43
+spec/vectors/ap2/holder_key_unknown.json:jwt:35
+spec/vectors/ap2/holder_sd_hash_mismatch.json:jwt:43

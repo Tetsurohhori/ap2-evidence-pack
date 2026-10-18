@@ -59,6 +59,73 @@ class TestReceiptShape(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, self.d)
 
+    @unittest.skipUnless(shutil.which("node"), "node absent: the JS half is not measurable")
+    def test_kb_signature_and_sd_hash_both_false_is_kb_signature_invalid(self):
+        """1.6.0 review (SPEC §6.9, `holder_binding`): a KB-JWT whose signature AND sd_hash are both false is stated once,
+        `kb_signature_invalid`. No vector has both: the mutant that names `sd_hash_mismatch` first survived every suite."""
+        import base64
+        sys.path.insert(0, os.path.join(_HERE, "verifiers"))
+        import differential_oracle as O
+        ev = _load("holder_kb_signature_invalid")   # signed by another key than cnf.jwk, sd_hash right
+        a = ev["artifacts"][0]
+        head, _, kb = a["sd_jwt_compact"].rpartition("~")
+        h, p, s = kb.split(".")
+        pay = json.loads(base64.urlsafe_b64decode(p + "=" * (-len(p) % 4)))
+        pay["sd_hash"] = "A" * 43   # another presentation
+        p2 = base64.urlsafe_b64encode(json.dumps(pay, separators=(",", ":")).encode()).decode().rstrip("=")
+        a["sd_jwt_compact"] = head + "~" + ".".join((h, p2, s))
+        path = _write(self.d, "both.json", O.rehash(ev))
+        r = ap2.verify_evidence(path)
+        kbr = r["artifacts"][0]["kb_jwt"]
+        self.assertEqual((kbr["signature_ok"], kbr["sd_hash_ok"], r["valid"]), (False, False, False))   # both false: the case
+        self.assertEqual(r["states"]["holder_binding"], {"state": "contradicted", "reasons": ["kb_signature_invalid"]})
+        out = subprocess.run(["node", JS, path], capture_output=True, text=True)
+        self.assertEqual(json.loads(out.stdout)["states"]["holder_binding"], r["states"]["holder_binding"])
+
+    @unittest.skipUnless(shutil.which("openssl"), "openssl absent: chain validation not measured")
+    def test_x5c_entry_not_strict_base64_is_chain_broken(self):
+        """1.6.0 review (SPEC §6.9, `issuer_identity`): an x5c entry after the leaf that is not strict base64 is
+        `chain_broken`. No vector has one: the mutant that drops that branch (-> chain_unresolved) survived every suite.
+        Control: the same chain with the entry removed validates (`ca_certified`)."""
+        import base64, datetime
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+        sys.path.insert(0, os.path.join(_HERE, "verifiers"))
+        import differential_oracle as O
+        b64u = lambda b: base64.urlsafe_b64encode(b).decode().rstrip("=")  # noqa: E731
+        sk, ca = ec.generate_private_key(ec.SECP256R1()), ec.generate_private_key(ec.SECP256R1())
+        nums = sk.public_key().public_numbers()
+        jwk = {"kty": "EC", "crv": "P-256", "x": b64u(nums.x.to_bytes(32, "big")), "y": b64u(nums.y.to_bytes(32, "big"))}
+        ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "review CA")])
+        t0, t1 = datetime.datetime(2026, 1, 1), datetime.datetime(2046, 1, 1)
+        leaf = (x509.CertificateBuilder().subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "review subject")]))
+                .issuer_name(ca_name).public_key(sk.public_key()).serial_number(2).not_valid_before(t0).not_valid_after(t1).sign(ca, hashes.SHA256()))
+        ca_cert = (x509.CertificateBuilder().subject_name(ca_name).issuer_name(ca_name).public_key(ca.public_key()).serial_number(3)
+                   .not_valid_before(t0).not_valid_after(t1).add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+                   .sign(ca, hashes.SHA256()))
+        anchor = os.path.join(self.d, "ca.pem")
+        with open(anchor, "wb") as f:
+            f.write(ca_cert.public_bytes(serialization.Encoding.PEM))
+        leaf_b64 = base64.b64encode(leaf.public_bytes(serialization.Encoding.DER)).decode()
+        base = _load("valid_signed")
+        got = {}
+        for name, x5c in (("control", [leaf_b64]), ("bad-entry", [leaf_b64, "%%%not-base64"])):
+            hdr = json.dumps({"alg": "ES256", "typ": "ap2-mandate+sd-jwt", "x5c": x5c}, separators=(",", ":"))
+            si = b64u(hdr.encode()) + "." + b64u(b'{"iss":"x"}')
+            r_, s_ = decode_dss_signature(sk.sign(si.encode("ascii"), ec.ECDSA(hashes.SHA256())))
+            ev = {"evidence_format": base["evidence_format"], "subject": "review", "created_utc": "2026-10-18T00:00:00Z",
+                  "artifacts": [{"name": "intent", "sd_jwt_compact": si + "." + b64u(r_.to_bytes(32, "big") + s_.to_bytes(32, "big")) + "~",
+                                 "header": json.loads(hdr), "key": {"jwk": jwk, "provenance_class": "x5c_header"}, "resolved_claims": {"iss": "x"},
+                                 "kb_jwt": {"present": False}, "verified_at_build": {"signature_ok": True, "disclosures_ok": True}}],
+                  "bindings": [], "honest_scope": base["honest_scope"]}
+            r = ap2.verify_evidence(_write(self.d, name + ".json", O.rehash(ev)), trust_anchor=anchor)
+            got[name] = r["states"]["issuer_identity"]
+        self.assertEqual(got["control"], {"state": "verified", "reasons": ["ca_certified"]})
+        self.assertEqual((got["bad-entry"]["state"], got["bad-entry"]["reasons"]), ("contradicted", ["chain_broken"]))
+
     def test_refusal_classes(self):
         ev = _load("valid_signed")
         cases = {"format_unsupported": dict(ev, evidence_format="ap2-evidence-pack/2.0"),

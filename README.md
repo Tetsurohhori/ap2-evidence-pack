@@ -82,7 +82,8 @@ write is now 74 (1.5.1 rewrote it in place). `pqcrypto.sigsuite.ProducerIdentity
 mode 0600; a key file this process may not write (`chmod 400`) is refused with `PermissionError` and left as it was, as
 in 1.5.1. A check asked for that cannot be run on this machine is 74, never a verdict: `verify --tsa-cert` and
 `--trust-anchor` when the files openssl reads cannot be written (`cannot write a temporary file for openssl`), or when
-openssl cannot be started or gives no answer within its time limit (`cannot run openssl here`). Since 1.6.0 that 74
+openssl cannot be started, is killed by a signal (1.6.0) or gives no answer within its time limit (`cannot run openssl
+here`). Since 1.6.0 that 74
 comes WITH the complete receipt on stdout — the subject of that check `not_evaluated/instrument_failure`, the others
 evaluated — and one line `check not run here: <reason>` on stderr (1.5.2–1.5.4: no receipt); the library raises
 `Ap2WriteError` carrying that receipt in `.receipt`. A complete JSON on stdout is this case; nothing or a cut JSON is a
@@ -186,7 +187,7 @@ python3 spec/vectors/ap2/run_ap2_conformance.py   # exit 0 = conformant
 | Implementation | Runtime / deps | Status |
 |---|---|---|
 | `ap2_evidence.py` | Python 3 + `cryptography`; `openssl` for `--tsa-cert` / `--trust-anchor` | reference — conformant 42/42 (1.6.0); ACVP ML-DSA-65 sigVer 9/9 |
-| `verifiers/js/ap2-verify.mjs` | Node with OpenSSL ≥ 3.5 for ML-DSA-65 (measured: Node 22.23.2 / OpenSSL 3.5.7 locally, Node 24 in CI), `node:crypto` only; on an older build ML-DSA-65 is SKIP = incomplete, never a pass, and the ML-DSA vectors are not measured (the JS conformance test skips, it does not pass); no TSA signature check — `tsa_verified` null, `time_anchor` `instrument_failure`; no x5c chain validation — `--trust-anchor` is a usage error (1.6.0) | independent — conformant on 37/42 on every normative field, the `report` and the `states` block, through `run_ap2_conformance.run(verify_fn=…)` (`test_ap2_conformance.py`); the 5 vectors that need openssl are SKIP (1.6.0) |
+| `verifiers/js/ap2-verify.mjs` | Node with OpenSSL ≥ 3.5 for ML-DSA-65 (measured: Node 22.23.2 / OpenSSL 3.5.7 locally, Node 24 in CI), `node:crypto` only; on an older build ML-DSA-65 is SKIP = incomplete, never a pass, and the ML-DSA vectors are not measured (the JS conformance test skips, it does not pass); no TSA signature check — `tsa_verified` null, `time_anchor` `instrument_failure`; no x5c chain validation — `--trust-anchor` is a usage error (1.6.0) | independent — conformant on 36/42 on every normative field, the `report` and the `states` block, through `run_ap2_conformance.run(verify_fn=…)` (`test_ap2_conformance.py`); the 6 vectors whose `requires` lists openssl are SKIP (1.6.0: the five under `tsa_cert` / `trust_anchor`, and `anchor_invalid`, which the differential oracle runs in both verifiers) |
 
 **Closed schema (1.4.0, SPEC §9; 1.4.1).** Measured on 1.3.0 on 2026-10-10: a key nobody had defined, written inside
 `rfc3161_timestamp`, `producer_signatures` or a `signatures[i]` entry, was `valid: true` in both verifiers with nothing in

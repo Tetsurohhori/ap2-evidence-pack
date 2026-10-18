@@ -647,12 +647,17 @@ def _run_openssl(cmd: List[str], timeout: int, **kw):
     `valid: false`, exit 1 under `--require-anchor`)."""
     import subprocess
     try:
-        return subprocess.run(cmd, capture_output=True, timeout=timeout, **kw)
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout, **kw)
     except subprocess.TimeoutExpired as e:
         raise Ap2WriteError(f"cannot run openssl here: no answer within {timeout} s") from e
     except OSError as e:
         why = os.strerror(e.errno) if isinstance(e.errno, int) else str(e)
         raise Ap2WriteError(f"cannot run openssl here: {type(e).__name__}: {why}") from e
+    if r.returncode < 0:   # 1.6.0 (SPEC §6.10, krausz §3.1 "a crashed dependency"): openssl killed by a signal gave no
+        # answer — measured 18/10/2026 with an openssl killed by SIGSEGV: `tsa_invalid` / `chain_unresolved`, a finding about
+        # the input, and exit 1 on a valid pack under --require-anchor
+        raise Ap2WriteError(f"cannot run openssl here: terminated by signal {-r.returncode}")
+    return r
 
 
 def _tmp_write(path: str, data: bytes) -> None:
@@ -2003,6 +2008,14 @@ def _main(argv: Optional[List[str]] = None) -> int:
                 if not sep or not alg or not key:
                     p.error(f"--trusted-producer-key expects ALG=B64 (got {spec!r})")
                 trusted.setdefault(alg, []).append(key)
+        for flag, path in (("--tsa-cert", a.tsa_cert), ("--trust-anchor", a.trust_anchor)):   # 1.6.0 review: a relying-party
+            if path is not None:   # file that cannot be read was handed to openssl and reported as `tsa_invalid` / `chain_unresolved`
+                try:               # (a statement about the pack); now a usage error, as for `build` (r5)
+                    ok = stat.S_ISREG(os.stat(path).st_mode) and os.access(path, os.R_OK)
+                except (OSError, ValueError):
+                    ok = False
+                if not ok:
+                    p.error(f"{flag}: cannot read {path!r} (not a readable regular file)")
         try:
             r = verify_evidence(a.evidence, trusted_producer_keys=trusted, require_pq=a.require_pq,
                                 require_producer=a.require_producer, require_anchor=a.require_anchor, tsa_cert=a.tsa_cert,

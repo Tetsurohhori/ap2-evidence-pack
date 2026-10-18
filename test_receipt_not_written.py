@@ -1039,6 +1039,33 @@ class TestOpensslTemporaryFiles(unittest.TestCase):
         rc, out, err = self._nproc(_PY + ["verify", os.path.join(_VEC, "anchor_valid.json")])   # no openssl asked for:
         self.assertEqual((rc, err), (0, b""))                                                  # the limit changes nothing
 
+    def test_openssl_killed_by_a_signal_is_74_not_a_finding(self):
+        """1.6.0 review — openssl killed by a signal (a crashed dependency, krausz §3.1) gave no answer: measured
+        18/10/2026, with an openssl that kills itself with SIGSEGV, `time_anchor: not_evaluated/tsa_invalid` and exit 1 on a
+        valid pack under --require-anchor, and `issuer_identity: chain_unresolved` — a statement about the input. Now: exit
+        74 WITH the complete receipt, that subject instrument_failure (SPEC §6.10). The control: an openssl that answers
+        "no" (exit 1, no signal) stays a check that ran."""
+        fake = tempfile.mkdtemp(dir=self.d)
+        for name, body in (("crash", "#!/bin/sh\nkill -SEGV $$\n"), ("no", "#!/bin/sh\necho 'Verification: FAILED'\nexit 1\n")):
+            os.makedirs(os.path.join(fake, name))
+            with open(os.path.join(fake, name, "openssl"), "w", encoding="ascii") as f:
+                f.write(body)
+            os.chmod(os.path.join(fake, name, "openssl"), 0o755)
+        cases = ((_PY + ["verify", os.path.join(_VEC, "anchor_valid.json"), "--tsa-cert", os.path.join(_VEC, "anchor_probe_tsa.crt"),
+                         "--require-anchor"], "time_anchor", "tsa_invalid"),
+                 (_PY + ["verify", self.x5c, "--trust-anchor", self.ca], "issuer_identity", "chain_unresolved"))
+        for cmd, subject, answered in cases:
+            with self.subTest(cmd=cmd[3:]):
+                env = dict(os.environ, PATH=os.path.join(fake, "crash") + os.pathsep + os.environ.get("PATH", ""))
+                p = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, env=env, timeout=300)
+                self._full_receipt_74(p.returncode, p.stdout, p.stderr, subject,
+                                      b"check not run here: cannot run openssl here: terminated by signal 11\n")
+                env["PATH"] = os.path.join(fake, "no") + os.pathsep + os.environ.get("PATH", "")
+                p = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, env=env, timeout=300)
+                r = json.loads(p.stdout)
+                self.assertNotEqual(p.returncode, 74, p.stderr)
+                self.assertEqual(r["states"][subject], {"state": "not_evaluated", "reasons": [answered]})
+
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "RLIMIT_NPROC does not bind root")
     def test_stamp_whose_openssl_cannot_be_started_is_74_and_the_pack_is_unchanged(self):
         """1.5.3 — measured on 1.5.2 under RLIMIT_NPROC 1: `stamp` gave "no anchor obtained: BlockingIOError …", a refusal,

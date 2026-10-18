@@ -253,13 +253,21 @@ class TestAp2ConformanceVectors(unittest.TestCase):
         clis = [[sys.executable, os.path.join(_HERE, "ap2_evidence.py"), "verify"],
                 ["node", os.path.join(_HERE, "verifiers", "js", "ap2-verify.mjs")]]
         for extra in ([], [V, "--no-such"], [V, V], [""], ["--help"], ["-h"], ["--", V], [V, "--require-pq=1"], [V, "--trusted-producer-key", ""],
-                      [V, "--trusted-producer-key"], [V, "--trusted-producer-key", "--require-pq"], [V, "--trusted-producer-key", "abc"], [V, "--trusted-producer-key", "", "--trusted-producer-key", "ed25519=AA=="], [V, "--tsa-cert", ""]):
+                      [V, "--trusted-producer-key"], [V, "--trusted-producer-key", "--require-pq"], [V, "--trusted-producer-key", "abc"], [V, "--trusted-producer-key", "", "--trusted-producer-key", "ed25519=AA=="], [V, "--tsa-cert", ""],
+                      [V, "--tsa-cert", os.path.join(_HERE, "no-such.pem")], [V, "--tsa-cert", os.devnull], [V, "--tsa-cert", _HERE]):   # 1.6.0 review: a certificate that cannot be read
             for cli in clis:
                 out = subprocess.run(cli + extra, capture_output=True, text=True)
                 self.assertEqual(out.returncode, 2, (cli[0], extra, out.stdout[:80], out.stderr[-120:])); self.assertEqual(out.stdout, "")
         for cli in clis:
             out = subprocess.run(cli + [V], capture_output=True, text=True)
             self.assertEqual(out.returncode, 0, cli[0]); self.assertTrue(json.loads(out.stdout)["valid"])
+        for cli in clis:   # the control of the 1.6.0 review cases: a readable certificate is no usage error
+            out = subprocess.run(cli + [V, "--tsa-cert", os.path.join(_HERE, "spec", "vectors", "ap2", "anchor_probe_tsa.crt")], capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, (cli[0], out.stderr[-120:]))
+        for extra in (["--trust-anchor", os.path.join(_HERE, "no-such.pem")], ["--trust-anchor", os.devnull]):   # the reference only (JS: always usage)
+            out = subprocess.run(clis[0] + [V] + extra, capture_output=True, text=True)
+            self.assertEqual((out.returncode, out.stdout), (2, ""), extra)
+            self.assertIn("cannot read", out.stderr)
         # r3: the BARE invocation (no subcommand at all) — the reference printed its help on stdout with exit 2, the JS verifier usage on stderr
         for cli in ([sys.executable, os.path.join(_HERE, "ap2_evidence.py")], clis[1]):   # r5: clis[-1] was the Python entry when node was absent, so the JS bare case never ran
             out = subprocess.run(cli, capture_output=True, text=True)

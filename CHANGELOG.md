@@ -18,13 +18,16 @@ The twelve fields of §6 keep their meaning.
    artifact or a failed signature. The twelve fields of two vectors change (measured on the reference, 2026-10-18):
    `unknown_key_artifact` — `digest_ok` and `policy_ok` true → false; `unknown_key_producer_entry` — `digest_ok`,
    `bindings_ok`, `policy_ok` true → false, `producer_present` true → false, `producer_ok` false → null. (The design of
-   this release listed the other changes but not `policy_ok`: a refusal receipt has `policy_ok: false`.) `valid` and the
-   exit code (1) change on no pack: such a pack was never valid. A 29/29 conformance to 1.5.x is not conformance to 1.6.0.
+   this release listed the other changes but not `policy_ok`: a refusal receipt has `policy_ok: false`.) `valid` changes on no pack: such a pack was never
+   valid. The exit code (1) changes in one branch only: under `--tsa-cert` or `--trust-anchor` on a machine where openssl
+   cannot run, 1.5.x reached that check first and exited 74 with no receipt; 1.6.0 refuses before any check runs (exit 1,
+   a refusal receipt) — measured 2026-10-18 with an openssl that cannot be started. A 29/29 conformance to 1.5.x is not conformance to 1.6.0.
    Only the unknown-key rule moves; a wrong type or a missing key stays an artifact error / FAIL entry, and the objects
    of §9.2 keep their standard's rule (`header_param_ignored`, `key_jwk_member_ignored` stay valid; an unknown `crit`
    stays the artifact's error).
 2. **Exit 74 for a check that could not be run here comes with the complete receipt** (SPEC §6.10): openssl that cannot be
-   started or does not answer, or temporary files openssl needs that cannot be written, under `--tsa-cert` or
+   started, is killed by a signal (1.5.x: `tsa_verified: false`, exit 1 under `--require-anchor`) or does not answer, or
+   temporary files openssl needs that cannot be written, under `--tsa-cert` or
    `--trust-anchor`. 1.5.2–1.5.4 wrote no receipt; now stdout holds the receipt (that subject
    `not_evaluated/instrument_failure`, the others evaluated) and stderr one line `check not run here: …`. A receipt that
    cannot be written stays 74 with `receipt not written: …` and no complete JSON: the reader tells the two apart by the
@@ -37,6 +40,10 @@ The twelve fields of §6 keep their meaning.
    `trust_anchor` (SPEC §7); a 1.5.x runner stops on them (closed format, exit 2). `requires_backend` is on 21 vectors (12
    in 1.5.4): `digest_mismatch` and the three `producer_*_fails_*` vectors, whose `states` block depends on the ML-DSA-65
    backend, and five of the new vectors — measured with `make_vectors_154.py --declare-backend`.
+5. **A `--tsa-cert` or `--trust-anchor` file that is not a readable regular file is a usage error** (exit 2, no receipt;
+   both verifiers for `--tsa-cert`). 1.5.4 handed it to openssl and reported the anchor as not TSA-verified and the
+   chain as not validated, which 1.6.0 would have named `tsa_invalid` / `chain_unresolved`: statements about the pack
+   for a file the relying party never supplied (measured 2026-10-18: `--tsa-cert /nonexistent.pem` on `anchor_valid`).
 
 **Added:**
 
@@ -69,7 +76,8 @@ corrected in SPEC §6.9: `issuer_x5c_chain_broken` (a chain never decided `valid
 entry makes the block not `ok` with no check failed).
 
 Measured on 2026-10-18 (Python 3.11.2, cryptography 50.0.1, OpenSSL 3.0.22, Node 22.23.2): conformance 42/42 (reference),
-37/42 + 5 SKIP (JS: the vectors that need openssl); differential oracle 185 cases, 0 disagreements, 12 declared; schema
+36/42 + 6 SKIP (JS: the six vectors whose `requires` lists openssl — the five under `tsa_cert` / `trust_anchor` and
+`anchor_invalid`, which the differential oracle still runs in both verifiers); differential oracle 185 cases, 0 disagreements, 12 declared; schema
 mutants (full) 23 486 mutations, 0 unmet, 0 disagreements on 23 545 files.
 
 ## 1.5.4 — 2026-10-18 — a producer block that does not verify states no trust and no post-quantum protection
