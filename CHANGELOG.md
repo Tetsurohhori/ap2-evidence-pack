@@ -68,6 +68,23 @@ The twelve fields of §6 keep their meaning.
 - SPEC §10 (informative): reading a receipt as a relying party, with the mapping of the 1.6.0 fields to ACP SEP #303
   §7.4a at commit 6710a3a and an informative mapping to draft-xg-payment-dispute-profile-01.
 
+**Third-verifier bench (`verifiers/sdk_crosscheck.py`), found by the first CI run of 1.6.0 (run 39135564764, red).**
+Two causes, both in the bench. (1) The unknown-key rule of SPEC §9.1 for `artifacts[i]` moved from the artifact's own
+`error` to a refusal of the whole pack (`unknown_member`, `artifacts: []`); the bench read the artifact's `error`, so
+controls 4 and 7 saw "no error", and the one pack of the corpus with such a key (the vector `unknown_key_artifact.json`) left the
+comparison as "refused before the mandate layer". `artifact_layer_view` now maps that refusal back onto each artifact that carries the key (the others are verified
+with those keys removed) and `token_layer_view` looks underneath as before; with that step removed controls 4 and 7 go red
+again (measured). (2) The new `holder_key_unknown` vector: we accept with `holder_binding` `not_evaluated`, the third stack,
+asked with the KB-JWT's `aud`/`nonce`, raises "No holder public key in SD-JWT". RFC 9901 §7.3 step 1 and §9.5 leave
+whether key binding is required to the verifier's policy, and step 5 applies only when it is: not a defect of this format,
+which keeps SPEC §6 step 2. The bench gains `DECLARED_WE_ACCEPT`, a declaration in that direction valid only while every
+condition holds on the artifact (the third stack's reason, our KB-JWT present and `verified: null`, no `cnf.jwk`), and a
+control 8 whose five variants must each stay a disagreement; with the conditions reduced to the name, four of them go
+red (measured). A control 9 holds the refusal mapping on two entries with unknown keys and on a refusal that survives
+the removal of those keys; the summary line, which still printed "none in the direction 'we accept, a third
+implementation refuses'" beside the declared case, now says "none undeclared" and counts the declared one apart. Re-measured 2026-10-18 (AP2 SDK `e1ea56db72a6`, `sd-jwt` 0.10.4, Python 3.11): 160 packs, 177 artifacts
+compared, 122 claim-sets, 0 undeclared disagreements, controls green, seeded divergence reported with exit 1.
+
 **Found by the bench before release:** the first draft of the derivation stated `sealed_content: verified` on packs whose
 KB-JWT failed, where §6 step 3 sets `bindings_ok: false` without recomputing the binding set — `verified` over a check that
 had not run (89 receipts). The binding set is now recomputed for the state whenever every artifact's signature and claims

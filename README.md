@@ -342,19 +342,27 @@ it prints the SDK commit and the `sd-jwt` version it actually loaded rather than
 AP2_SDK_PATH=/path/to/AP2/code/sdk/python python3 verifiers/sdk_crosscheck.py --hostile
 ```
 
-Re-measured 2026-10-11 on 1.5.0, vectors plus the hostile corpus: 144 packs seen, 41 refused before the mandate layer,
+Re-measured 2026-10-18 on 1.6.0 (same SDK commit, `sd-jwt` 0.10.4, Python 3.11), vectors plus the hostile corpus: 160 packs
+seen, 42 refused before the mandate layer, **177 artifacts compared, 122 claim-sets compared, 0 undeclared
+disagreements**, and **one declared divergence in the direction "we accept, the third stack refuses"**:
+`holder_key_unknown` (below, with its clause). The first CI run of 1.6.0 (run 39135564764) was red on the bench itself:
+1.6.0 turned an unknown key in `artifacts[i]` into a refusal of the whole pack, the bench still read it from the
+artifact's own `error`, and two of its positive controls (4 and 7) could no longer see it; the bench now maps that
+refusal back onto the artifact before comparing (CHANGELOG 1.6.0). Re-measured 2026-10-11 on 1.5.0, vectors plus the hostile corpus: 144 packs seen, 41 refused before the mandate layer,
 **154 artifacts compared, 102 claim-sets compared, 0 disagreements** on a rule the RFC puts on the verifier, none in the
-direction "we accept, a third implementation refuses" (AP2 SDK `e1ea56db72a6`, `sd-jwt` 0.10.4). Earlier the same day on 1.4.0
+direction "we accept, a third implementation refuses" on 1.5.0 (AP2 SDK `e1ea56db72a6`, `sd-jwt` 0.10.4). Earlier the same day on 1.4.0
 (same SDK, `sd-jwt` 0.10.4), on the seventeen vectors alone: **26
 artifacts compared, 23 claim-sets compared, 0 disagreements** (two packs are refused before the mandate layer and one
 artifact at a closed object of SPEC §9.1, which the third stack never sees). Vectors plus the hostile corpus together:
 **142 artifacts compared (26 from the vectors, 116 hostile), 90 claim-sets compared, 0 undeclared disagreements**. The three file-object cases of the oracle (a FIFO, a symlink to
-`/dev/zero`, a directory) are not handed to this bench, which counts and prints them apart. And **none in the direction
-that would matter most — nothing this repository accepts and the third stack refuses**. One word needs care in that sentence: "refuses", for the third stack, means "raises". Of
-its 19 refusals here, 8 are deliberate and carry a message, and 11 are uncaught internal errors (`JSONDecodeError`,
+`/dev/zero`, a directory) are not handed to this bench, which counts and prints them apart. And, on 1.4.0, **none in the direction
+that would matter most — nothing this repository accepts and the third stack refuses** (on 1.6.0 there is one, declared:
+`holder_key_unknown`, above). One word needs care in that sentence: "refuses", for the third stack, means "raises". Of
+its 19 refusals on 1.4.0 (22 on 1.6.0: 11 and 11), 8 are deliberate and carry a message, and 11 are uncaught internal errors (`JSONDecodeError`,
 `'str' object has no attribute 'get'`, a failed tuple unpack). Fail-closed in effect, but not a verdict, and the bench
 prints that split rather than hiding it inside a total. The buckets that decide what counts as a disagreement at all
-are this repository's own; the one direction never bucketed away is "we accept, the third stack refuses".
+are this repository's own; the one direction never bucketed away by a reason is "we accept, the third stack refuses" —
+since 1.6.0 a divergence there can only be declared case by case, with its clause and conditions (control 8).
 
 **The other direction, which comparing opinions cannot reach.** Every pack above is produced here, so a reading shared
 by both of this repository's verifiers would also shape the corpus they are tested on. So the third stack also ISSUES:
@@ -374,7 +382,13 @@ is set aside: the bench rebuilds those objects as `build` writes them and compar
 more controls hold that step: closed objects broken around a token we refuse and the third stack accepts (asked for real);
 a recorded KB copy around a KB-JWT that fails, and an artifact only the closed layer refuses (the third stack's verdict
 supplied by the control, accept and refuse respectively, since no real case of either exists); a malformed key block,
-which stays this repository's own.
+which stays this repository's own. Since 1.6.0 a fifth (control 8) holds the declaration of a divergence in the direction
+"we accept, the third stack refuses": the declared case must be printed apart, and five variants of it — another case
+with the same reason, the same case with another third-stack reason, our KB-JWT verified, our KB-JWT absent, an issuer
+carrying `cnf.jwk` — must each stay a disagreement. A control 9 holds the mapping of the 1.6.0 pack
+refusal: with an unknown key in every entry, each entry carries the §9.1 error and verifies underneath once the others'
+unknown keys are removed; a refusal that survives the removal (an unknown key in a producer-signature entry) stays a
+refusal. The summary line counts the declared case apart from the undeclared ones.
 
 **Every malformed input gets a verdict, never a traceback** (`verifiers/type_fuzz.py`). The count above — 11 of the
 third stack's 19 refusals being uncaught internal errors — raises the same question about this repository, and it is
@@ -394,7 +408,7 @@ single crash out of eight would pass a laxer test. Below that, it exits 2 withou
 
 **What the numbers do NOT cover,** stated so nobody reads them as more than they are. The third stack has no notion of
 the container (digest, bindings, producer signature, RFC 3161, policy, key provenance, and the `resolved_claims` the
-file records), so **38 packs** this repository refuses at the file level and **16 artifacts** it refuses at a layer
+file records), so **42 packs** (1.6.0, 2026-10-18) this repository refuses at the file level and **16 artifacts** it refuses at a layer
 the third stack has no notion of (key provenance, the `resolved_claims` the file itself records, and since 1.4.0 the
 closed objects of SPEC §9.1) have no
 third-stack opinion at all; **2 more artifacts** carry a key block that is not a key (`null`, or a `jwk` that is a
@@ -407,11 +421,21 @@ already says); and **3 hostile files** this bench cannot even read (a BOM, a 100
 byte). Of the six verification steps of SPEC §6, this bench covers the signature and the disclosure resolution inside
 step 2 — not the §3.1 profile, not `claims_match`, not the KB-JWT expectations, not the provenance reconciliation.
 
-**One declared divergence, with its clause.** On a presentation carrying a disclosure that matches no digest, this
+**Two declared divergences, each with its clause.** On a presentation carrying a disclosure that matches no digest, this
 repository refuses and the third stack accepts, returning a payload with the claim dropped. RFC 9901 §7.1 step 5: *"If
 any Disclosure was not referenced by digest value in the Issuer-signed JWT (directly or recursively via other
 Disclosures), the SD-JWT MUST be rejected."* No forged claim passes either way — the divergence is the verdict, not the
-content. Three further cases are not a defect of anyone: they are where the RFC's own verification algorithm ignores what its
+content. The second goes the other way. `holder_key_unknown` carries a KB-JWT while the issuer payload has no `cnf.jwk`:
+this repository accepts the pack and states `holder_binding` `not_evaluated`/`holder_key_unknown` (SPEC §6 step 2: the
+KB-JWT is recorded as unverifiable and never fails the pack by itself); the third stack, which this bench asks with the
+KB-JWT's own `aud`/`nonce` — i.e. as a verifier that requires key binding — raises *"No holder public key in SD-JWT"*.
+RFC 9901 §7.3 makes that a verifier-policy question, not a rule: step 1, *"Determine if Key Binding is to be checked
+according to the Verifier's policy for the use case at hand"*; step 5 (*"If Key Binding is required: a. Determine the
+public key for the Holder from the SD-JWT"*) and the abort that follows a failed step apply only under that policy; and
+§9.5, *"Verifiers MUST decide whether Key Binding is required for a particular use case before verifying a credential."*
+This format verifies offline, cannot validate `aud`/`nonce`/`iat` (§7.3 steps 5.e/5.f) and does not require key binding;
+a relying party whose policy does reads `not_evaluated` as not met. The bench declares it with every condition checked
+on the artifact, so any other divergence in that direction still turns it red. Three further cases are not a defect of anyone: they are where the RFC's own verification algorithm ignores what its
 structural MUSTs require. `_sd` that is not an array of strings (§4.2.4.1: *"The _sd key MUST refer to an array of
 strings"*) and an array placeholder whose value is not a digest string (§4.2.4.2: *"The value MUST be the digest of the
 Disclosure"*) are MUSTs addressed to the Issuer — and §7.1 step 3.b collects only well-formed `_sd` arrays and

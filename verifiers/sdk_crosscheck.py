@@ -95,6 +95,45 @@ DECLARED = {
         "content.",
 }
 
+# The direction "we accept, the third stack refuses" is never bucketed by a reason string. It can be DECLARED only per
+# case, with the clause that makes it a verifier-policy difference and not a hole, and only while EVERY condition below
+# holds on the artifact (`declared_we_accept`): the third stack's own refusal reason, our KB-JWT recorded present and
+# `verified: null`, and the issuer payload carrying no `cnf.jwk`. Any other wrong-way divergence — another case, another
+# reason, or the same case once our verifier says something else — stays a [DIFF] and the bench red (control 8).
+DECLARED_WE_ACCEPT = {
+    "holder_key_unknown.json:cart": {
+        "third_reason": "ValueError: No holder public key in SD-JWT",
+        "why": 'RFC 9901 §7.3 step 1: "Determine if Key Binding is to be checked according to the Verifier\'s policy for '
+               'the use case at hand"; step 5 ("If Key Binding is required: a. Determine the public key for the Holder '
+               'from the SD-JWT") runs only under that policy, and §9.5: "Verifiers MUST decide whether Key Binding is '
+               'required for a particular use case before verifying a credential." This bench hands the third stack the '
+               "KB-JWT's aud/nonce, i.e. asks it as a verifier that REQUIRES key binding, where a missing holder key is a "
+               "failed step and the presentation MUST be rejected. This format verifies offline, cannot validate aud/nonce/"
+               "iat (§7.3 steps 5.e/5.f) and does not require key binding (SPEC §6 step 2): the KB-JWT is recorded "
+               "present-but-unverifiable and the receipt states holder_binding not_evaluated/holder_key_unknown — never "
+               "verified. A relying party whose policy requires key binding reads that state as not met. First measured "
+               "2026-10-18, against sd-jwt 0.10.4 through the AP2 SDK; re-measured on every run.",
+    },
+}
+
+
+def _issuer_has_cnf_jwk(compact):
+    try:
+        cnf = ap2.parse_sd_jwt(compact)["payload"].get("cnf")
+    except Exception:   # noqa: BLE001 — unreadable: not the declared case
+        return None
+    return isinstance(cnf, dict) and "jwk" in cnf
+
+
+def declared_we_accept(name, note, our_art, compact):
+    """The declaration that applies to this wrong-way divergence, or None. All conditions, never the name alone."""
+    d = DECLARED_WE_ACCEPT.get(name)
+    kb = our_art.get("kb_jwt") if isinstance(our_art.get("kb_jwt"), dict) else {}
+    if (d is None or note != d["third_reason"] or kb.get("present") is not True or kb.get("verified") is not None
+            or _issuer_has_cnf_jwk(compact) is not False):
+        return None
+    return d
+
 
 def classify(err):
     if not err:
@@ -115,6 +154,52 @@ def classify(err):
                                "3.e removes every _sd key): ignoring the malformed part is what the RFC prescribes, "
                                "rejecting it is this format's stricter choice")
     return "unknown", ""
+
+
+_ART_SUBS = (("key", "_KEY_KEYS"), ("kb_jwt", "_KB_COPY_KEYS"), ("verified_at_build", "_VAB_KEYS"))
+
+
+def _strip_unknown_keys(a):
+    """Drop only what the 1.6.0 unknown-key rule of SPEC §9.1 looks at: keys of artifacts[i] and of its key, kb_jwt and
+    verified_at_build objects that this revision does not define. True when anything was dropped."""
+    dropped = False
+    for k in [k for k in a if k not in ap2._ARTIFACT_KEYS]:
+        del a[k]
+        dropped = True
+    for sub, keys in _ART_SUBS:
+        o = a.get(sub)
+        if isinstance(o, dict):
+            for k in [k for k in o if k not in getattr(ap2, keys)]:
+                del o[k]
+                dropped = True
+    return dropped
+
+
+def artifact_layer_view(ev, ours):
+    """Our per-artifact verdicts, also when 1.6.0 refused the whole pack for an unknown key inside an artifact.
+
+    1.6.0 (SPEC §9.1, not additive) moved that rule from the artifact's own `error` to a pack refusal of class
+    `unknown_member` with `artifacts: []`. Read as a refusal before the mandate layer, every such pack left the
+    comparison, and the controls that put `x_unknown` in an entry read "no error" (CI run 39135564764, controls 4 and 7).
+    The refusal is still a closed object of this format around a token: each artifact carrying such a key gets the
+    refusal as its error (it carries CLOSED_MARK, so the §9.1 path looks underneath), and the others the verdict of the
+    same pack with those keys removed. Any other refusal is returned as it is."""
+    import copy        # noqa: PLC0415
+    msg = ours.get("refused")
+    if not (isinstance(msg, str) and ours.get("refusal_class") == "unknown_member" and msg.startswith("artifacts[")
+            and isinstance(ev.get("artifacts"), list)):
+        return ours
+    ev2 = copy.deepcopy(ev)
+    flagged = {i for i, a in enumerate(ev2["artifacts"]) if isinstance(a, dict) and _strip_unknown_keys(a)}
+    r = _verify_obj(ev2)
+    if r.get("refused") or not flagged:
+        return ours
+    arts = list(r.get("artifacts") or [])
+    for i in flagged:
+        if i < len(arts) and isinstance(arts[i], dict):
+            arts[i] = dict(arts[i], error=(msg if msg.startswith(f"artifacts[{i}]") else
+                                           f"artifacts[{i}]: unknown key {CLOSED_MARK}"))
+    return dict(r, artifacts=arts, refused=None, refusal_class=None)
 
 
 def token_layer_view(ev, idx):
@@ -139,6 +224,9 @@ def token_layer_view(ev, idx):
         a["key"] = {k: v for k, v in a["key"].items() if k in ap2._KEY_KEYS}
     for k in [k for k in a if k not in ap2._ARTIFACT_KEYS]:
         del a[k]
+    for other in ev2["artifacts"]:   # 1.6.0: another entry's unknown key refuses the whole pack, not this token
+        if isinstance(other, dict) and other is not a:
+            _strip_unknown_keys(other)
     arts = _verify_obj(ev2).get("artifacts") or []
     under = arts[idx] if idx < len(arts) and isinstance(arts[idx], dict) else {"error": f"rebuilt pack refused {CLOSED_MARK}"}
     return under, a
@@ -177,7 +265,7 @@ def closed_layer_control(sdk_sdjwt, JWK, base_pack):
 
     def case(label, ev, their, want):
         nonlocal ok_all
-        top = (_verify_obj(ev).get("artifacts") or [{}])[0]
+        top = (artifact_layer_view(ev, _verify_obj(ev)).get("artifacts") or [{}])[0]
         under, src = token_layer_view(ev, 0)
         got = closed_layer_decision(under, src, their)
         good = CLOSED_MARK in str(top.get("error", "")) and got == want
@@ -224,6 +312,57 @@ def closed_layer_control(sdk_sdjwt, JWK, base_pack):
     ev7 = copy.deepcopy(base)
     ev7["artifacts"][0]["x_unknown"] = True
     case("control 7 we accept underneath, third stack refusing", ev7, False, "we_accept")
+
+    # 8: a declared wrong-way divergence holds only with every condition; each variant below must stay a [DIFF].
+    hk = os.path.join(ROOT, "spec", "vectors", "ap2", "holder_key_unknown.json")
+    with open(hk, encoding="utf-8") as fh:
+        ev8 = json.load(fh)
+    a8 = ev8["artifacts"][0]
+    o8 = ap2.verify_evidence(hk)["artifacts"][0]
+    name8, note8 = "holder_key_unknown.json:cart", DECLARED_WE_ACCEPT["holder_key_unknown.json:cart"]["third_reason"]
+    with open(os.path.join(ROOT, "spec", "vectors", "ap2", "kb_jwt_valid.json"), encoding="utf-8") as fh:
+        cnf_compact = json.load(fh)["artifacts"][0]["sd_jwt_compact"]
+    variants = [("the declared case", name8, note8, o8, a8["sd_jwt_compact"], True),
+                ("another case, same reason", "valid_signed.json:intent", note8, o8, a8["sd_jwt_compact"], False),
+                ("same case, another third-stack reason", name8, "InvalidJWSSignature: Verification failed", o8,
+                 a8["sd_jwt_compact"], False),
+                ("same case, our KB-JWT verified", name8, note8, dict(o8, kb_jwt=dict(o8["kb_jwt"], verified=True)),
+                 a8["sd_jwt_compact"], False),
+                ("same case, issuer carrying cnf.jwk", name8, note8, o8, cnf_compact, False),
+                ("same case, our KB-JWT absent", name8, note8, dict(o8, kb_jwt=dict(o8["kb_jwt"], present=False)),
+                 a8["sd_jwt_compact"], False)]
+    for label, nm, nt, oa, cp, want in variants:
+        got = declared_we_accept(nm, nt, oa, cp) is not None
+        good = got == want
+        ok_all &= good
+        out.append(f"  [{'PASS' if good else 'FAIL'}] control 8 declared wrong-way divergence, {label}: "
+                   f"{'declared' if got else 'DIFF'} (want {'declared' if want else 'DIFF'})")
+
+    # 9: the 1.6.0 pack refusal mapped back (artifact_layer_view). Every entry carrying an unknown key gets a §9.1 error
+    # and is looked at underneath with the OTHER entries' unknown keys removed; a refusal that survives the removal (here
+    # an unknown key in a producer-signature entry) keeps the pack refused, never an admitted pack with no artifacts.
+    ev9 = copy.deepcopy(base)
+    for a in ev9["artifacts"]:
+        a["x_unknown"] = True
+    v9 = artifact_layer_view(ev9, _verify_obj(ev9))
+    arts9 = v9.get("artifacts") or []
+    for i in range(len(ev9["artifacts"])):
+        top = arts9[i] if i < len(arts9) and isinstance(arts9[i], dict) else {}
+        under, _ = token_layer_view(ev9, i)
+        good = (not v9.get("refused") and CLOSED_MARK in str(top.get("error", "")) and "error" not in under
+                and under.get("signature_ok") is True)
+        ok_all &= good
+        out.append(f"  [{'PASS' if good else 'FAIL'}] control 9 unknown key in every entry, artifact {i}: ours "
+                   f"{top.get('error', 'no error')!r}; underneath {under.get('error', 'no error')!r}")
+    ev9b = copy.deepcopy(base)
+    ev9b["artifacts"][0]["x_unknown"] = True
+    ev9b["producer_signatures"]["signatures"][0]["x_unknown"] = True
+    raw9b = _verify_obj(ev9b)
+    v9b = artifact_layer_view(ev9b, raw9b)
+    good = bool(raw9b.get("refused")) and v9b.get("refused") == raw9b.get("refused")
+    ok_all &= good
+    out.append(f"  [{'PASS' if good else 'FAIL'}] control 9 a refusal that survives the removal stays a refusal: "
+               f"{str(v9b.get('refused'))[:80]!r}")
     return ok_all, out
 
 
@@ -504,7 +643,7 @@ def main(argv):
             unreadable += 1
             continue
         try:
-            ours = ap2.verify_evidence(path)
+            ours = artifact_layer_view(ev, ap2.verify_evidence(path))
         except Exception as e:   # noqa: BLE001
             print(f"  [SKIP] {os.path.basename(path):44} our reference raised {type(e).__name__}")
             continue
@@ -557,7 +696,13 @@ def main(argv):
                     continue
                 if our and not their:
                     # The safety-critical direction: something WE accept and a third implementation refuses. It is never
-                    # bucketed away, whatever the reason — that is the shape of a hole in our own verifier.
+                    # bucketed away, whatever the reason — that is the shape of a hole in our own verifier. Only a
+                    # declaration with its clause and every condition met (`declared_we_accept`, control 8) prints it apart.
+                    d = declared_we_accept(name, note, our_art, compact)
+                    if d is not None:
+                        seen_declared.add(name)
+                        print(f"  [DECL] {name:46} ours=ACCEPT third=refuse ({note}) — {d['why']}")
+                        continue
                     diffs += 1
                     findings.append((name, "we accept, third refuses", note))
                     print(f"  [DIFF] {name:46} ours=ACCEPT third=refuse — {note}")
@@ -626,7 +771,7 @@ def main(argv):
             else:
                 print(f"  [OK  ] {name:46} both {'accept' if our else 'refuse'}"
                       + (f" ({note})" if not our else ""))
-    missing = sorted(set(DECLARED) - seen_declared) if "--hostile" in argv else []
+    missing = sorted((set(DECLARED) | set(DECLARED_WE_ACCEPT)) - seen_declared) if "--hostile" in argv else []
     if missing:
         print(f"  [WARN] declared divergences that did not appear: {missing} — the declaration no longer describes "
               "this machine (a newer third-party release may have fixed it, or the case stopped being built)")
@@ -648,9 +793,13 @@ def main(argv):
     print(f"artifacts compared: {n} | claim-sets compared: {claims_cmp} | not askable: {gaps}")
     print(f"mandate-layer disagreements with the third stack, on a rule the RFC puts on the verifier: {diffs}/{n}")
     wrong_way = [f for f in findings if f[1] in ("we accept, third refuses", "seeded divergence")]
-    print("  (none in the direction 'we accept, a third implementation refuses')" if not wrong_way
+    declared_wrong_way = sorted(set(DECLARED_WE_ACCEPT) & seen_declared)
+    print("  (none undeclared in the direction 'we accept, a third implementation refuses')" if not wrong_way
           else f"  INCLUDING {len(wrong_way)} in the direction 'we accept, the third stack refuses': "
                f"{[f[0] for f in wrong_way]}")
+    if declared_wrong_way:
+        print(f"  declared in that direction (verifier policy, with every condition checked, see [DECL]): "
+              f"{len(declared_wrong_way)} {declared_wrong_way}")
     if tmpdir:
         import shutil    # noqa: PLC0415
         shutil.rmtree(tmpdir, ignore_errors=True)
